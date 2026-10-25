@@ -37,11 +37,12 @@ Playing on Mac or Linux, 30 FPS is consistently achieved with 5x upscale setting
 
 ## Supported Editions
 
-| File                   | Edition                                                      |
-| ---------------------- | ------------------------------------------------------------ |
-| mcdub3-nx-usa.nro      | NTSC-U (English)                                             |
-| mcdub3-nx-eur.nro      | PAL (Europe: English, French, German, Spanish, Italian)      |
-| mcdub3remix-nx-eur.nro | *Remix*, PAL (Europe) only, in development: not released yet |
+| File                   | Game                               | Edition                                                    |
+| ---------------------- | ---------------------------------- | ---------------------------------------------------------- |
+| mcdub3-nx-usa.nro      | Midnight Club 3: Dub Edition       | NTSC-U (English)                                           |
+| mcdub3-nx-eur.nro      | Midnight Club 3: Dub Edition       | PAL (Europe: English, French, German, Spanish, Italian)    |
+| mcdub3remix-nx-eur.nro | Midnight Club 3: Dub Edition Remix | PAL (English)                                              |
+| mcdub3remix-nx-usa.nro | Midnight Club 3: Dub Edition Remix | NTSC-U (Europe: English, French, German, Spanish, Italian) |
 
 ## Installation
 
@@ -50,11 +51,18 @@ Playing on Mac or Linux, 30 FPS is consistently achieved with 5x upscale setting
 Visit the [installation](https://laureladastra.github.io/mcdub3-homepage/) page for a guided experience or manually package the folder by downloading the files from our [releases](https://github.com/laureladastra/mcdub3-nx/releases) and organise the folder according to the following hierarchy:
 
 ```
-sdmc:/switch/mcdub3-nx/
-├── mcdub3-nx-usa.nro       the downloaded NRO (mcdub3-nx-eur.nro for the European disc)
-├── mcdub3_env.txt          optional settings                            
-├── /game                   the extracted disc (not the ISO), USA or Europe
-└── /game-eur               optional: a second edition's disc beside it
+
+SD card (sdmc:)
+└── switch/
+    ├── mcdub3-nx/                    ← DUB Edition
+    │   ├── mcdub3-nx-usa.nro
+    │   ├── mcdub3-nx-eur.nro
+    │   ├── game-usa/                 ← USA disc
+    │   └── game-eur/                 ← European disc
+    │
+    └── mcdub3remix-nx/               ← Dub Edition Remix
+        ├── mcdub3remix-nx-eur.nro
+        └── game-eur/                 ← European disc
 ```
 
 Copy the game files to the `/game` directory within this folder. Move this folder to `sdmc:/switch/mcdub3-nx/` on the Nintendo Switch. Install the .nsp to get a plug-and-play experience.
@@ -191,6 +199,7 @@ The PS2 release of the same game (SLUS-21029) stores its profiles in its own lay
 * we're currently at v0.3.0, expect crashes and latency
 * driving on the Nintendo Switch runs at 18-25 frames per second.
 * a race can occasionally hang (the screen stops, the game does not crash)
+* rain introduces quite some latency during racing
 
 ## ⚙️ &nbsp;Configuration
 
@@ -245,7 +254,7 @@ described in the example file and in the source.
 
 ## Contributing
 
-Pull requests and issues are currently closed to write a supportive guideline to properly manage this aspect of the project and ensure valuable collaboration. Provided the open-source nature of this project, contributions will be highly welcome again once this guideline is available and if they follow the requirements.
+Pull requests and issues are currently closed to write a supportive guideline to properly manage this aspect of the project and ensure valuable collaboration. Provided the open-source nature of this project, contributions are welcome again if they follow the requirements of the guideline.
 
 ## License
 
