@@ -361,6 +361,14 @@ in nfsu2-sw's README (Configuration section); the toolkit is the same.
   (CSV table loader), MC3_STATE_TRACE (both games: state requests and
   changes), MC3_ABI_CHECK (Remix: callee-saved registers and stack across
   the movie path); tools/match_lifts.py, tools/port_overrides.py.
+  USA disc (2026-10-25, ADR 0009): its code is the European one's but for
+  one branch, `ja` -> `jae` at 0x001525FC (cmp byte [0x0053F80C], 0x1E,
+  in sub_00152420); .rdata differs in 19 bytes (read from the disc). Both
+  run on the European lift: config/remix/edition_variants.json, the
+  translator's --edition-variants, g_recomp_xbe_variant set by main.c
+  ("disc: edition usa, branch variant 1"). `make xbe-edition XBE=...`
+  compares any new disc. CI builds every APP_EDITIONS of every game;
+  runner discs $MC3_DISCS/usa (DUB) and $MC3_DISCS/remix-eur (Remix).
   Races (fixed 2026-10-25): (1) from the countdown the camera went to a
   top view and turned for good -- `fucomip; lahf; test ah, 0x44; jnp`
   (the "look around" input == 0 test in sub_002C48C0) lost its lahf, the

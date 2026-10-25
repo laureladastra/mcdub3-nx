@@ -1,5 +1,5 @@
-# Switch release: publish a finished Switch build (its NROs) as a GitHub
-# release. Started by hand (Actions > Switch release > Run workflow): the
+# Switch release: publish a finished Switch build (its NROs: every edition
+# of every game, the DUB Edition's and the Remix's) as a GitHub release. Started by hand (Actions > Switch release > Run workflow): the
 # latest successful "Switch build", or the one whose run ID is given. NSP
 # forwarders are not built here (they need the console keys): make nsp
 # locally (CONTRIBUTING.md, NSP forwarder).
@@ -97,6 +97,10 @@ jobs:
         id: notes
         run: |
           source config/dub/app.env
+          for cfg in config/*/app.env; do       # one version for every game
+            v=$(bash -c 'source "$1"; echo "$APP_VERSION"' _ "$cfg")
+            [ "$v" = "$APP_VERSION" ] || { echo "$cfg is version $v, config/dub/app.env $APP_VERSION: one release carries every game"; exit 1; }
+          done
           tag="v$APP_VERSION"
           if gh release view "$tag" >/dev/null 2>&1; then
             echo "release $tag exists already: raise APP_VERSION in config/dub/app.env"; exit 1
@@ -116,7 +120,7 @@ jobs:
         with:
           run-id: ${{ steps.build.outputs.run_id }}
           github-token: ${{ github.token }}
-          pattern: mcdub3-nx-*
+          pattern: mcdub3*-nx-*         # mcdub3-nx-<v>-<edition> (DUB Edition), mcdub3remix-nx-... (Remix)
           path: ${{ runner.temp }}/build
 
       - name: Check the NROs
@@ -167,11 +171,12 @@ jobs:
             echo
             echo "---"
             echo
-            echo "| File | Edition | SHA-256 |"
-            echo "|---|---|---|"
+            echo "| File | Game | Edition | SHA-256 |"
+            echo "|---|---|---|---|"
             for info in build/*/*.buildinfo; do
               f=$(basename "${info%.buildinfo}.nro")
-              echo "| \`$f\` | $(sed -n 's/^edition=//p' "$info") | \`$(sed -n 's/^nro_sha256=//p' "$info")\` |"
+              title=$(sed -n 's/^title=//p' "$info"); title=${title:-Midnight Club 3: DUB Edition}
+              echo "| \`$f\` | $title | $(sed -n 's/^edition=//p' "$info") | \`$(sed -n 's/^nro_sha256=//p' "$info")\` |"
             done
             echo
             echo "Build $(sed -n 's/^build=//p' build/*/*.buildinfo | head -1), commit $SHA."

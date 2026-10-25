@@ -62,6 +62,13 @@ if [ "${LIFT_ONLY:-0}" != "1" ]; then
         --disasm-dir "$A/disasm" --func-id-dir "$A/func_id"
 fi
 
+# config/<game>/edition_variants.json: branches whose condition differs
+# between editions of the disc (the Remix's USA disc: one), lifted with both
+# and chosen at run time (main.c sets g_recomp_xbe_variant from the disc).
+VARIANTS=()
+[ -f "$MC3_CONFIG/edition_variants.json" ] \
+    && VARIANTS=(--edition-variants "$MC3_CONFIG/edition_variants.json")
+
 # recomp_types.h is written only when absent, so a stale copy would hide
 # register-model changes in the toolkit. Nothing edits it by hand.
 rm -f "$MC3_GEN_DIR/recomp_types.h"
@@ -80,6 +87,7 @@ fi
     --all --split 250 --gen-dir "$MC3_GEN_DIR" -o "$A/recomp" \
     --disasm-dir "$A/disasm" --func-id-dir "$A/func_id" --abi-dir "$A/abi" \
     --exclude-manual "$EXCLUDE" --mmio-sections "$MMIO" \
+    ${VARIANTS[@]+"${VARIANTS[@]}"} \
     ${RECOMP_ARGS[@]+"${RECOMP_ARGS[@]}"} 2>&1 | tee "$A/recomp.log"
 
 # The trace wrappers are compiled with the lifted code (CMake globs gen/*.c).

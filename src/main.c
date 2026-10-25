@@ -514,6 +514,18 @@ static int xbe_matches_lift(const void *data, size_t size)
     for (i = 0; i < sizeof known / sizeof known[0]; i++) {
         if (h == known[i].fnv) {
             s_disc_edition = known[i].name;
+#ifdef MC3_XBE_VARIANTS
+            {   /* its branch variants (config/<game>/edition_variants.json) */
+                extern int g_recomp_xbe_variant;
+#define MC3_VARIANT_ENTRY(vname, n) \
+                if (strcmp(known[i].name, vname) == 0) g_recomp_xbe_variant = n;
+                MC3_XBE_VARIANTS(MC3_VARIANT_ENTRY)
+#undef MC3_VARIANT_ENTRY
+                if (g_recomp_xbe_variant)
+                    fprintf(stderr, "disc: edition %s, branch variant %d\n",
+                            known[i].name, g_recomp_xbe_variant);
+            }
+#endif
             return 1;
         }
         snprintf(names + strlen(names), sizeof names - strlen(names), "%s%s",

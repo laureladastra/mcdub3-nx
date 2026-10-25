@@ -1,11 +1,15 @@
-# Switch build: tests, then the NRO for each edition, as a versioned
-# artifact. Started by hand (Actions > Switch build > Run workflow); release
-# a build with switch-release.yml.
+# Switch build: tests, then the NRO for each game and edition, as a
+# versioned artifact. Started by hand (Actions > Switch build > Run
+# workflow); release a build with switch-release.yml.
+#
+# Which NROs: every edition in APP_EDITIONS of every game's
+# config/<game>/app.env (the DUB Edition: usa, eur; the Remix: eur), so a
+# new edition needs no change here. All games share one version.
 #
 # The NRO is built from the lifted code of the disc's default.xbe, so the
-# build stage runs on a self-hosted runner that has the disc (labels
+# build stage runs on a self-hosted runner that has the discs (labels
 # self-hosted, mcdub3-disc: the Linux VM or the Mac, with Docker;
-# CONTRIBUTING.md, Releases). The disc and
+# CONTRIBUTING.md, Releases). The discs and
 # the lifted C never leave that machine; only the finished NRO is uploaded.
 # Only workflow_dispatch: a pull request (from a fork) can never reach the
 # self-hosted runner.
@@ -30,23 +34,53 @@ jobs:
   tests:
     uses: ./.github/workflows/ci.yml
 
+  plan:
+    name: Games and editions
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Plan
+        id: plan
+        run: |
+          # One entry per edition of each game (config/<game>/app.env), all
+          # at the same version (one release carries every game's NROs).
+          versions=""
+          for cfg in config/*/app.env; do
+            game=$(basename "$(dirname "$cfg")")
+            v=$(bash -c 'source switch/app.env; source "$1"; echo "$APP_VERSION"' _ "$cfg")
+            versions="$versions $game=$v"
+            bash -c 'source switch/app.env; source "$1"; for e in $APP_EDITIONS; do echo "$2 $e"; done' _ "$cfg" "$game"
+          done > "$RUNNER_TEMP/plan"
+          echo "versions:$versions"
+          [ "$(echo "$versions" | tr ' ' '\n' | sed -n 's/.*=//p' | sort -u | wc -l)" -eq 1 ] \
+            || { echo "::error::the games' APP_VERSION differ ($versions): one release carries all of them"; exit 1; }
+          python3 - "$RUNNER_TEMP/plan" >> "$GITHUB_OUTPUT" <<'PY'
+          import json, sys
+          rows = [l.split() for l in open(sys.argv[1]) if l.strip()]
+          print("matrix=" + json.dumps({"include": [{"game": g, "edition": e} for g, e in rows]}))
+          PY
+          cat "$RUNNER_TEMP/plan"
+
   build:
-    name: NRO (${{ matrix.edition }})
-    needs: tests
+    name: NRO (${{ matrix.game }} ${{ matrix.edition }})
+    needs: [tests, plan]
     runs-on: [self-hosted, mcdub3-disc]
     timeout-minutes: 240
     strategy:
-      matrix:
-        # One entry per edition (config/dub/app.env APP_EDITIONS): an NRO each,
-        # mcdub3-nx-<edition>.nro. They share one lift (config/dub/xbe_editions.h:
-        # the discs' code is the same), made from the disc config/dub/xbe_facts.h
-        # names, so the runner needs only that one, in $MC3_DISCS/<edition>/
-        # (CONTRIBUTING.md, Releases). An edition with other code would need
-        # a lift of its own (docs/decisions/0005).
-        edition: [usa, eur]
+      # Every edition of every game shares the game's lift when its code is
+      # the same (config/<game>/xbe_editions.h), made from the disc
+      # config/<game>/xbe_facts.h names, so the runner needs only that disc
+      # per game: $MC3_DISCS/<edition>/ for the DUB Edition,
+      # $MC3_DISCS/remix-<edition>/ for the Remix (CONTRIBUTING.md,
+      # Releases). An edition with other code would need a lift of its own
+      # (docs/decisions/0005; tools/xbe_edition.py tells).
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     env:
+      GAME: ${{ matrix.game }}
       # Kept between runs on the runner: the Python venv and build trees.
-      MC3_WORK: ${{ github.workspace }}/../mcdub3-work-${{ matrix.edition }}
+      MC3_WORK: ${{ github.workspace }}/../mcdub3-work-${{ matrix.game }}-${{ matrix.edition }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -55,19 +89,27 @@ jobs:
       - name: Version
         id: version
         run: |
-          source config/dub/app.env
+          source switch/app.env
+          source "config/$GAME/app.env"
+          source "config/$GAME/game.env"
           echo "version=$APP_VERSION" >> "$GITHUB_OUTPUT"
+          echo "package=$MC3_SD_DIR_DEFAULT" >> "$GITHUB_OUTPUT"
           echo "build_id=$APP_VERSION+${{ github.run_number }}.${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
-          echo "Building mcdub3-nx $APP_VERSION (${{ matrix.edition }})"
+          echo "Building $MC3_SD_DIR_DEFAULT $APP_VERSION (${{ matrix.edition }})"
 
       - name: Disc
         run: |
           : "${MC3_DISCS:?the runner needs MC3_DISCS in its .env (CONTRIBUTING.md, Releases)}"
-          # The lifted edition's disc, whichever edition this package is for.
-          lift=$(sed -n 's/^#define MC3_EDITION *"\(.*\)"/\1/p' config/dub/xbe_facts.h)
-          test -f "$MC3_DISCS/$lift/default.xbe" \
-            || { echo "no disc for $lift (the lifted edition) in $MC3_DISCS"; exit 1; }
-          echo "MC3_GAME_DIR=$MC3_DISCS/$lift" >> "$GITHUB_ENV"
+          # The lifted edition's disc, whichever edition this package is for:
+          # <edition>/ for the DUB Edition, remix-<edition>/ for the Remix
+          # (the game's disc prefix without "game").
+          source "config/$GAME/game.env"
+          lift=$(sed -n 's/^#define MC3_EDITION *"\(.*\)"/\1/p' "config/$GAME/xbe_facts.h")
+          prefix=${MC3_DISC_PREFIX#game}; prefix=${prefix#-}
+          disc="$MC3_DISCS/${prefix:+$prefix-}$lift"
+          test -f "$disc/default.xbe" \
+            || { echo "no disc for $GAME $lift (the lifted edition) at $disc"; exit 1; }
+          echo "MC3_GAME_DIR=$disc" >> "$GITHUB_ENV"
 
       - name: Python for the lift
         run: |
@@ -81,8 +123,8 @@ jobs:
           make lift
           # The committed facts must describe this disc: same lift, same
           # boot check (src/main.c).
-          git diff --exit-code config/dub/xbe_facts.h \
-            || { echo "config/dub/xbe_facts.h differs for this disc: run make lift locally and commit it"; exit 1; }
+          git diff --exit-code "config/$GAME/xbe_facts.h" \
+            || { echo "config/$GAME/xbe_facts.h differs for this disc: run make lift GAME=$GAME locally and commit it"; exit 1; }
 
       - name: Build
         env:
@@ -95,7 +137,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: mcdub3-nx-${{ steps.version.outputs.version }}-${{ matrix.edition }}
+          name: ${{ steps.version.outputs.package }}-${{ steps.version.outputs.version }}-${{ matrix.edition }}
           path: ${{ runner.temp }}/release/
           retention-days: 90
           if-no-files-found: error
@@ -105,7 +147,7 @@ jobs:
           DESCRIPTION: ${{ inputs.description }}
         run: |
           {
-            echo "### mcdub3-nx ${{ steps.version.outputs.version }} (${{ matrix.edition }})"
+            echo "### ${{ steps.version.outputs.package }} ${{ steps.version.outputs.version }} (${{ matrix.edition }})"
             echo
             echo "Build \`${{ steps.version.outputs.build_id }}\`, run ID \`${{ github.run_id }}\`."
             if [ -n "$DESCRIPTION" ]; then echo; echo "$DESCRIPTION"; fi

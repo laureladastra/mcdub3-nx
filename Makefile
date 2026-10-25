@@ -42,7 +42,7 @@ export VULKAN DEBUG GEN_DEBUGINFO JOBS SECS HEADLESS GDB LTO LTO_JOBS NO_GAME WI
        RELEASE_DIR MC3_BUILD_ID EDITION WIN_ARCH DISC
 
 .PHONY: help setup nsp check-vm extract lift regen relift \
-        build build-vk build-debug windows mac-app run run-gdb run-headless snapshot report hoststacks profile record difftest trap \
+        xbe-edition build build-vk build-debug windows mac-app run run-gdb run-headless snapshot report hoststacks profile record difftest trap \
         switch switch-vk switch-lto send \
         hd-dump hd-tools hd-upscale import-save save-sync-up save-sync-down \
         seeds lift-report log du clean-build clean-gen clean toolkit-test
@@ -87,6 +87,10 @@ seeds:  ## Propose seeds from a run log: make seeds LOG=work-<game>/logs/run_x.l
 	source tools/env.sh && mc3_python && cd xboxrecomp && "$$MC3_PYTHON" -m tools.seed_from_log "$(abspath $(LOG))" \
 	    "$$MC3_XBE" --functions "$$MC3_ANALYSIS_DIR/disasm/functions.json" --seeds "$$MC3_SEEDS"
 	@echo "review the additions: git diff config/$(GAME)/seed_functions.json"
+
+xbe-edition:  ## Can another disc run on this game's lift? make xbe-edition GAME=remix XBE=game-remix-usa/default.xbe (prints what to add)
+	@test -n "$(XBE)" || { echo "usage: make xbe-edition [GAME=remix] XBE=<another disc's default.xbe> [EDITION=<name>]"; exit 1; }
+	@bash -c 'unset EDITION; source tools/env.sh && python3 tools/xbe_edition.py "$(XBE)" "$$MC3_XBE" $(EDITION)'
 
 lift-report:  ## Summarise the last lift (functions, stubs, unimplemented)
 	@grep -E '^(Poll loops|MMIO|[0-9]+/[0-9]+ functions|[0-9]+ unresolved|[0-9]+ instruction)' $(WORK)/analysis/recomp.log \

@@ -210,11 +210,33 @@ Add `GAME=remix` to any target: `make lift build run GAME=remix`,
 | NRO | `mcdub3-nx-<edition>.nro` | `mcdub3remix-nx-<edition>.nro` |
 | app identity (Switch, Mac, Windows) | `config/dub/app.env` | `config/remix/app.env` |
 
-Editions: the DUB Edition runs the USA and European discs on one lift; the
-Remix only its European disc so far (`config/remix/xbe_editions.h`). Another
-Remix edition joins the same way once its `default.xbe` is compared: an XBE
-that differs only in its header is one more entry there, one whose code
-differs needs a lift of its own, which the layout does not support yet.
+Editions: each game runs all its editions on one lift. The DUB Edition's
+USA and European discs share their code exactly; the Remix's USA disc
+differs from its European (lifted) one in a single branch condition, which
+the lift carries both ways (an *edition variant*, below). To add a disc:
+
+```sh
+make xbe-edition GAME=remix XBE=game-remix-usa/default.xbe
+```
+
+compares its `default.xbe` with the lifted one and prints what to add:
+
+- **the same code** (only the header or data differ, as between editions
+  usually): one `X(...)` line in `config/<game>/xbe_editions.h`, the
+  edition in `APP_EDITIONS` and a random `APP_TITLE_ID_<edition>` in
+  `config/<game>/app.env`;
+- **the same code but for branch conditions** (a `jcc` whose opcode alone
+  changed): the same, plus the branches in
+  `config/<game>/edition_variants.json` and the edition's variant number in
+  `MC3_XBE_VARIANTS` (`xbe_editions.h`); then `make relift`. The lifter
+  emits each such branch with both conditions, and the runtime picks one by
+  `g_recomp_xbe_variant`, which `src/main.c` sets from the disc it
+  identified (`disc: edition usa, branch variant 1` in the log);
+- **other code differences**: a lift of its own, which the layout does not
+  support yet.
+
+The CI build then makes the new edition's NRO by itself (it builds every
+`APP_EDITIONS` entry of every game).
 
 A fix for one game goes in its own `config/<game>/` or `src/games/<game>/`;
 the other game never builds it. A fix that holds for both goes in shared
@@ -640,8 +662,9 @@ installed on the host instead (`DEVKITPRO`, default `/opt/devkitpro`).
 
 ## Releases (Switch)
 
-Official builds are Switch NROs, one per edition of the game, published as
-GitHub releases ([ADR 0005](docs/decisions/0005-switch-releases.md)).
+Official builds are Switch NROs, one per edition of each game (the DUB
+Edition: usa, eur; the Remix: eur, usa), published together as GitHub
+releases ([ADR 0005](docs/decisions/0005-switch-releases.md)).
 
 | Stage | Workflow | Runs on | Started by |
 |---|---|---|---|
@@ -651,10 +674,14 @@ GitHub releases ([ADR 0005](docs/decisions/0005-switch-releases.md)).
 
 **To release a version**
 
-1. Set `APP_VERSION` in `config/dub/app.env` (e.g. `0.2.0`).
+1. Set `APP_VERSION` in `config/dub/app.env` and `config/remix/app.env`
+   (e.g. `0.2.0`; the same in both: one release carries every game, and CI
+   checks it).
 2. Write its notes in `RELEASE_NOTES.md` under `## v0.2.0`. Commit and push.
 3. Actions > **Switch build** > Run workflow, with an optional description.
-   It runs the tests, then builds `mcdub3-nx-<edition>.nro` on the runner.
+   It runs the tests, then builds an NRO for every edition of every game
+   on the runner (`APP_EDITIONS` in each `config/<game>/app.env`):
+   `mcdub3-nx-<edition>.nro`, `mcdub3remix-nx-<edition>.nro`.
 4. Try the NRO from the run's artifact on the console.
 5. Actions > **Switch release** > Run workflow (pre-release or not). It
    releases the latest successful build; give a run ID only to release an
@@ -679,12 +706,15 @@ GitHub releases ([ADR 0005](docs/decisions/0005-switch-releases.md)).
 - *The runner* (the Linux VM, with Docker as for `make switch`): Settings >
   Actions > Runners > New self-hosted runner > Linux, ARM64; follow the
   commands, and give it the extra label `mcdub3-disc`.
-  In the runner's folder, `.env` sets where the discs are (one folder per
-  edition):
+  In the runner's folder, `.env` sets where the discs are: one folder per
+  game holding the disc its lift was made from (`MC3_EDITION` in
+  `config/<game>/xbe_facts.h`); the other editions are built from it.
 
   ```sh
   # actions-runner/.env
-  MC3_DISCS=/home/<you>/mcdub3-discs      # contains usa/default.xbe (the lifted disc)
+  MC3_DISCS=/home/<you>/mcdub3-discs
+  #   usa/default.xbe         the DUB Edition (lifted from the USA disc)
+  #   remix-eur/default.xbe   the Remix (lifted from the European disc)
   ```
 
   The console keys never go to a runner (CLAUDE.md, Rules): NSPs are built
@@ -693,15 +723,18 @@ GitHub releases ([ADR 0005](docs/decisions/0005-switch-releases.md)).
 
   Run it as a service (`sudo ./svc.sh install && sudo ./svc.sh start`). Each
   build lifts the disc again in a work folder beside the checkout
-  (`mcdub3-work-<edition>`, kept between runs: Python venv, build trees).
+  (`mcdub3-work-<game>-<edition>`, kept between runs: Python venv, build
+  trees; the older `mcdub3-work-<edition>` folders can be deleted).
 - *Editions*: `config/<game>/xbe_facts.h` names the disc this lift was made from
   (`MC3_EDITION`, from the XBE's region), `config/<game>/xbe_editions.h` every
   edition whose code is the same (usa, eur); the NRO refuses any other
   `default.xbe` with a message. The build matrix builds one NRO per edition
-  (`make switch EDITION=<edition>`: mcdub3-nx-<edition>.nro, looking in
-  `game-<edition>/` on the card first, then `game/`), all from the lifted
-  disc, so the runner needs only that one in `MC3_DISCS`. An edition with
-  other code would need a lift of its own (ADR 0005). Each edition's NSP
+  of each game (`make switch GAME=<game> EDITION=<edition>`:
+  <sd folder>-<edition>.nro, looking in `game-<edition>/` on the card
+  first, then `game/`), all from the lifted disc, so the runner needs only
+  that one per game in `MC3_DISCS`. Editions whose code differs in branch
+  conditions only share the lift too (edition variants, see Two games);
+  other code differences would need a lift of their own (ADR 0005). Each edition's NSP
   has its own title ID and name in `config/<game>/app.env`.
 
 ## Texture packs (HD)

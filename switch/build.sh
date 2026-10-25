@@ -111,6 +111,8 @@ if [ -n "${RELEASE_DIR:-}" ]; then
     cp "$BUILT.elf" "$RELEASE_DIR/$NRO_NAME.elf"
     {
         echo "version=$APP_VERSION"
+        echo "game=$MC3_GAME"
+        echo "title=$MC3_GAME_TITLE"
         echo "edition=$EDITION"
         echo "build=${MC3_BUILD_ID:-local}"
         echo "commit=${GITHUB_SHA:-$(git -C "$MC3_REPO" rev-parse HEAD 2>/dev/null || echo unknown)}"

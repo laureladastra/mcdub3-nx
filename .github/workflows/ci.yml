@@ -49,6 +49,10 @@ jobs:
           source config/dub/app.env
           [[ "$APP_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] \
             || { echo "config/dub/app.env: APP_VERSION '$APP_VERSION' is not x.y.z"; exit 1; }
+          for cfg in config/*/app.env; do       # one version for every game (one release)
+            v=$(bash -c 'source "$1"; echo "$APP_VERSION"' _ "$cfg")
+            [ "$v" = "$APP_VERSION" ] || { echo "$cfg: APP_VERSION $v, config/dub/app.env $APP_VERSION: keep them equal"; exit 1; }
+          done
           grep -q "^## v$APP_VERSION\b" RELEASE_NOTES.md \
             || echo "::warning::RELEASE_NOTES.md has no '## v$APP_VERSION' section yet (needed to release)"
           echo "version $APP_VERSION"

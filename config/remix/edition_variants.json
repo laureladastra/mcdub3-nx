@@ -1,0 +1,12 @@
+{
+ "note": "Branches whose condition differs between editions of the Remix's disc, lifted with every condition and chosen at run time by g_recomp_xbe_variant (src/main.c sets it from the disc; 0 = the lifted European disc). tools/xbe_edition.py finds them. Change this file: make relift.",
+ "variants": {"usa": 1},
+ "jcc": [
+  {
+   "addr": "0x001525FC",
+   "base": "ja",
+   "usa": "jae",
+   "note": "USA vs Europe, the only code difference (2026-10-25): cmp byte ptr [0x0053F80C], 0x1E; Europe takes the branch above 30, the USA at 30 and above. In sub_00152420 (4155 bytes, from the frame loop at 0x0001EBF0)."
+  }
+ ]
+}

@@ -275,8 +275,15 @@ mc3_check_lift_fresh() {
     if [ "$MC3_SEEDS" -nt "$gen" ]; then
         mc3_fail "${MC3_SEEDS#$MC3_REPO/} is newer than the lifted C: run make regen first (make regen build)"
     fi
-    if [ "$MC3_CONFIG/not_functions.json" -nt "$gen" ]; then
+    # The stamp every lift writes (regen.sh): recomp_funcs.h keeps its date
+    # when a relift leaves it unchanged.
+    local lifted="$gen"
+    [ -f "$stamp" ] && lifted="$stamp"
+    if [ "$MC3_CONFIG/not_functions.json" -nt "$lifted" ]; then
         mc3_fail "config/$MC3_GAME/not_functions.json is newer than the lifted C: run make regen first (make regen build)"
+    fi
+    if [ "$MC3_CONFIG/edition_variants.json" -nt "$lifted" ]; then
+        mc3_fail "config/$MC3_GAME/edition_variants.json is newer than the lifted C: run make relift first (make relift build)"
     fi
     local now
     if ! now=$(mc3_manual_overrides | tr -d '\r'); then
