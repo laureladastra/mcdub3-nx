@@ -41,8 +41,8 @@ Playing on Mac or Linux, 30 FPS is consistently achieved with 5x upscale setting
 | ---------------------- | ---------------------------------- | ---------------------------------------------------------- |
 | mcdub3-nx-usa.nro      | Midnight Club 3: Dub Edition       | NTSC-U (English)                                           |
 | mcdub3-nx-eur.nro      | Midnight Club 3: Dub Edition       | PAL (Europe: English, French, German, Spanish, Italian)    |
-| mcdub3remix-nx-eur.nro | Midnight Club 3: Dub Edition Remix | PAL (English)                                              |
-| mcdub3remix-nx-usa.nro | Midnight Club 3: Dub Edition Remix | NTSC-U (Europe: English, French, German, Spanish, Italian) |
+| mcdub3remix-nx-usa.nro | Midnight Club 3: Dub Edition Remix | NTSC-U (English)                                           |
+| mcdub3remix-nx-eur.nro | Midnight Club 3: Dub Edition Remix | PAL (Europe: English, French, German, Spanish, Italian)    |
 
 ## Installation
 
@@ -61,7 +61,9 @@ SD card (sdmc:)
     │   └── game-eur/                 ← European disc
     │
     └── mcdub3remix-nx/               ← Dub Edition Remix
+        ├── mcdub3remix-nx-usa.nro
         ├── mcdub3remix-nx-eur.nro
+        ├── game-usa/                 ← USA disc
         └── game-eur/                 ← European disc
 ```
 
