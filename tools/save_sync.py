@@ -10,8 +10,13 @@
   --profile P    one profile, by folder (0075195616BF) or name (laurd);
                  default all
   --udata DIR    the local UDATA folder (default $MC3_GAME_DIR/UDATA)
-  --remote DIR   the Switch's UDATA folder, from the card's root
-                 (default /switch/<MC3_SD_DIR>/game/UDATA: mcdub3-nx, mcdub3remix-nx)
+  --remote DIR   the Switch's UDATA folder, from the card's root. Default:
+                 where the game writes them, in its disc folder as the NRO
+                 picks it: /switch/<MC3_SD_DIR>/game-<edition>/UDATA if that
+                 disc folder is on the card, else .../game/UDATA
+                 (<MC3_SD_DIR>: mcdub3-nx, GAME=remix mcdub3remix-nx;
+                 <edition>: EDITION=, else the local disc's, e.g. eur for
+                 game-remix-eur/)
   --user / --password
                  only for a server that asks for a login. Without them the
                  tool logs in anonymously, or not at all if the server
@@ -242,6 +247,29 @@ def describe(side, files, profile=None):
     print(f'  {side}: {len(files)} files, {len(profiles)} profiles {" ".join(profiles)}'.rstrip())
 
 
+def remote_udata_default(ftp, local_udata):
+    """The Switch's UDATA as the NRO finds its disc (src/main.c):
+    game-<edition>/ if that folder is on the card, else game/. The game
+    writes its saves inside the disc folder it plays from."""
+    app = '/switch/%s' % os.environ.get('MC3_SD_DIR', 'mcdub3-nx')
+    edition = os.environ.get('EDITION', '')
+    if not edition:
+        # The local disc folder's edition: game-eur -> eur, game-remix-usa -> usa.
+        disc = os.path.basename(os.path.dirname(os.path.abspath(local_udata)))
+        prefix = os.environ.get('MC3_DISC_PREFIX', 'game')
+        if disc.startswith(prefix + '-'):
+            edition = disc[len(prefix) + 1:]
+    tried = []
+    if edition:
+        d = posixpath.join(app, 'game-' + edition)
+        if ftp_is_dir(ftp, d):
+            return posixpath.join(d, 'UDATA')
+        tried.append(d)
+    if tried:
+        print(f'  ({tried[0]} is not on the card: using {app}/game)')
+    return posixpath.join(app, 'game', 'UDATA')
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('direction', choices=['up', 'down'])
@@ -251,7 +279,7 @@ def main():
     ap.add_argument('--game-id', default='54540079')
     ap.add_argument('--profile')
     ap.add_argument('--udata')
-    ap.add_argument('--remote', default='/switch/%s/game/UDATA' % os.environ.get('MC3_SD_DIR', 'mcdub3-nx'))
+    ap.add_argument('--remote')
     ap.add_argument('--list', action='store_true')
     ap.add_argument('--yes', action='store_true')
     a = ap.parse_args()
@@ -260,11 +288,10 @@ def main():
     udata = os.path.expanduser(a.udata) if a.udata else \
         os.path.join(os.environ.get('MC3_GAME_DIR') or os.path.join(REPO, 'game'), 'UDATA')
     local = os.path.join(udata, a.game_id)
-    remote = posixpath.join(a.remote, a.game_id)
+    remote_udata = a.remote          # chosen once connected (the card decides)
     if a.direction == 'up' and not os.path.isdir(local):
         raise SystemExit(f'no saves here: {local} does not exist (UDATA= for another folder)')
 
-    print(f'Switch {a.host}:{a.port}  {remote}\nhere          {local}')
     ftp = connect_or_explain(ftplib.FTP, a.host, a.port)
     try:
         login(ftp, a.user, a.password)
@@ -276,6 +303,11 @@ def main():
         login(ftp, a.user, a.password)
         ftp.prot_p()
         print('  (encrypted connection: FTPS)')
+
+    if not remote_udata:
+        remote_udata = remote_udata_default(ftp, udata)
+    remote = posixpath.join(remote_udata, a.game_id)
+    print(f'Switch {a.host}:{a.port}  {remote}\nhere          {local}')
 
     folder = None
     # The sending side's profiles, {folder: name}: to find one by name, and to

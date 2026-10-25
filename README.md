@@ -165,9 +165,14 @@ Profiles live where the Xbox kept them, in `UDATA/54540079/` inside the game fol
 ```sh
 make save-sync-down HOST_IP=192.168.1.20   # Switch -> computer
 make save-sync-up   HOST_IP=192.168.1.20   # computer -> Switch
+
+make save-sync-down HOST_IP=192.168.1.20 GAME=remix              # the Remix's profiles
+make save-sync-down HOST_IP=192.168.1.20 GAME=remix EDITION=usa  # its USA disc's
 ```
 
-Both commands show the direction before copying (Switch to computer, or computer to Switch) and which profiles will be created or overwritten, and ask to confirm (`YES=1` skips the question). `HOST_IP` is the Switch's address, shown by its FTP server. The port is 21 by default; for another, add it after the IP: `HOST_IP=192.168.1.20:5000`. Profiles are added or replaced, never deleted, and the receiving side is backed up to `work-dub/saves-backup/` first. `PROFILE=` syncs one profile, by folder or by name (`PROFILE=laurd`), `LIST=1` only shows both sides, `FTP_USER=`/`FTP_PASS=` if the server asks for a login (a server that requires encryption, FTPS, works too). The Mac app keeps its saves elsewhere: add `UDATA="$HOME/Library/Application Support/mcdub3/game/UDATA"`. On a Mac, "No route to host" while `ping` works means the app you run `make` in lacks macOS's Local Network permission. It's per app (Terminal, iTerm, VS Code, VSCodium): allow it in System Settings > Privacy & Security > Local Network, then restart that app.
+On the Switch the profiles are inside the disc folder the game plays from: `game-<edition>/UDATA` when that folder is on the card (e.g. `sdmc:/switch/mcdub3remix-nx/game-eur/`), otherwise `game/UDATA`. The tool looks there by itself; on the computer it uses the disc folder `make run` would play (`game-remix-eur/` for the Remix), `EDITION=` picks another.
+
+Both commands show the direction before copying (Switch to computer, or computer to Switch) and which profiles will be created or overwritten, and ask to confirm (`YES=1` skips the question). `HOST_IP` is the Switch's address, shown by its FTP server. The port is 21 by default; for another, add it after the IP: `HOST_IP=192.168.1.20:5000`. Profiles are added or replaced, never deleted, and the receiving side is backed up to `work-dub/saves-backup/` first. `PROFILE=` syncs one profile, by folder or by name (`PROFILE=laurd`), `LIST=1` only shows both sides, `FTP_USER=`/`FTP_PASS=` if the server asks for a login (a server that requires encryption, FTPS, works too). The Mac app keeps its saves elsewhere: add `UDATA="$HOME/Library/Application Support/mcdub3/game/UDATA"` (the Remix app: `.../mcdub3remix/game/UDATA`). On a Mac, "No route to host" while `ping` works means the app you run `make` in lacks macOS's Local Network permission. It's per app (Terminal, iTerm, VS Code, VSCodium): allow it in System Settings > Privacy & Security > Local Network, then restart that app.
 
 **Importing a save from a real Xbox.** Profiles from an original Xbox, such as a memory unit dump (`.gsx`) from a save site, need re-signing first: the game calls them "damaged" otherwise. One command does both:
 
