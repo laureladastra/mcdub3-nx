@@ -26,6 +26,7 @@ set(KERNEL_SOURCES
     recomp_trace.c
     nv2a_pb_scan.c
     nv2a_pb_exec.c
+    xbe_variant.c
 )
 
 if(WIN32)

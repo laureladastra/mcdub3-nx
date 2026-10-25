@@ -250,6 +250,11 @@ def main():
                              "not implement yet: the body still runs, only "
                              "the answer changes, and the emitted code is "
                              "inert unless RECOMP_FORCE_RETURN is set")
+    parser.add_argument("--edition-variants", metavar="JSON", default=None,
+                        help="branch conditions that differ between editions of the "
+                             "disc: {\"variants\": {\"usa\": 1}, \"jcc\": [{\"addr\": "
+                             "\"0x...\", \"base\": \"ja\", \"usa\": \"jae\"}]}; chosen at "
+                             "run time by g_recomp_xbe_variant")
     parser.add_argument("--mmio-sections", metavar="NAMES", default="",
                         help="Comma-separated XBE sections (e.g. DSOUND) whose "
                              "functions access hardware registers. Their memory "
@@ -313,6 +318,20 @@ def main():
 
     print(f"Loading data files...", file=sys.stderr)
     t0 = time.time()
+
+    if args.edition_variants:
+        from . import lifter as _lifter
+        spec = json.load(open(args.edition_variants))
+        variants = spec.get("variants", {})
+        for entry in spec.get("jcc", []):
+            addr = int(entry["addr"], 16)
+            if entry.get("base"):
+                _lifter.EDITION_VARIANT_BASE[addr] = entry["base"]
+            _lifter.EDITION_VARIANT_JCC[addr] = [
+                (int(idx), entry[name]) for name, idx in sorted(variants.items(), key=lambda kv: kv[1])
+                if name in entry]
+        print(f"Edition variants: {len(_lifter.EDITION_VARIANT_JCC)} branch(es) "
+              f"from {args.edition_variants} ({', '.join('%s=%d' % kv for kv in variants.items())})")
 
     translator = BatchTranslator(
         xbe_path=args.xbe_path,
@@ -512,6 +531,17 @@ def main():
                   f"(addresses called but not detected as functions)",
                   file=sys.stderr)
         _report_unimplemented(stats)
+        from . import lifter as _lifter
+        missed = sorted(set(_lifter.EDITION_VARIANT_JCC) - _lifter.EDITION_VARIANTS_APPLIED)
+        if _lifter.EDITION_VARIANT_JCC:
+            print(f"Edition variants: {len(_lifter.EDITION_VARIANTS_APPLIED)} of "
+                  f"{len(_lifter.EDITION_VARIANT_JCC)} branches lifted with their variants",
+                  file=sys.stderr)
+        if missed:
+            # A variant not lifted means an edition would run the other's
+            # branch without a word: stop.
+            sys.exit("error: edition variant branch(es) not met as a jcc after a known "
+                     "flag setter: " + ", ".join("0x%08X" % a for a in missed))
         for f_path in stats.get("files", []):
             print(f"  {f_path}", file=sys.stderr)
     else:

@@ -498,6 +498,37 @@ def _has_xmm_operand(ops):
 SSE_COMPARES = ("comiss", "comisd", "ucomiss", "ucomisd")
 
 
+# Edition variants (--edition-variants FILE): discs of one game whose code
+# differs only in a branch condition share a lift. At such a jcc the lifted
+# condition is chosen at run time, by g_recomp_xbe_variant, which the title
+# sets from the disc it identified. The MC3 Remix's USA disc differs from
+# the European one in a single byte, `ja` -> `jae` at 0x001525FC
+# (2026-10-25). Address -> [(variant, mnemonic)]; filled by __main__.
+EDITION_VARIANT_JCC = {}
+EDITION_VARIANT_BASE = {}        # address -> the lifted disc's mnemonic, checked
+EDITION_VARIANTS_APPLIED = set()
+
+
+def _edition_variant_jcc(insn, cond_expr, desc, flag_setter, flag_ops):
+    """The jcc's condition, wrapped in a choice per edition variant."""
+    alts = EDITION_VARIANT_JCC.get(insn.address)
+    if not alts:
+        return cond_expr, desc
+    base = EDITION_VARIANT_BASE.get(insn.address)
+    if base and base != insn.mnemonic:
+        raise ValueError("edition variants: 0x%08X is %s in this XBE, the config says %s"
+                         % (insn.address, insn.mnemonic, base))
+    for variant, mnemonic in alts:
+        alt = _make_condition(mnemonic, flag_setter, flag_ops)
+        if not alt:
+            raise ValueError("edition variant %s at 0x%08X: no condition for %s after %s"
+                             % (variant, insn.address, mnemonic, flag_setter))
+        cond_expr = "(g_recomp_xbe_variant == %d ? (%s) : (%s))" % (variant, alt[0], cond_expr)
+    EDITION_VARIANTS_APPLIED.add(insn.address)
+    return cond_expr, desc + " [edition variants: " + ", ".join(
+        "%d %s" % (v, m) for v, m in alts) + "]"
+
+
 def _lahf_value(flag_setter, flag_ops):
     """C expression for the byte LAHF loads, or None if a flag is unknown."""
     if flag_setter in SSE_COMPARES:
@@ -1114,6 +1145,8 @@ def try_match_cmp_jcc(insns, idx, lifter=None):
         return None
 
     cond_expr, desc = result
+    cond_expr, desc = _edition_variant_jcc(
+        second, cond_expr, desc, *normalise_zero_test(first.mnemonic, first.operands))
     target = second.jump_target
     stmt = _emit_cond_goto(cond_expr, second.mnemonic, desc, target, lifter)
     return (stmt, 2)
@@ -3927,6 +3960,8 @@ def lift_basic_block(lifter, bb, flag_state=None):
                 curr.mnemonic, last_flag_setter, last_flag_ops)
             if result:
                 cond_expr, desc = result
+                cond_expr, desc = _edition_variant_jcc(
+                    curr, cond_expr, desc, last_flag_setter, last_flag_ops)
                 target = curr.jump_target
                 stmt = _emit_cond_goto(
                     cond_expr, curr.mnemonic, desc, target, lifter)

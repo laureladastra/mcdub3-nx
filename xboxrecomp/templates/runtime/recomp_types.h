@@ -389,6 +389,11 @@ static inline int64_t recomp_fist(double value, uint16_t control, unsigned bits)
     return (int64_t)rounded;
 }
 
+/* Which edition's branches to take where editions of a disc differ only in
+ * a branch condition (translator --edition-variants): 0 = the lifted disc's.
+ * Set by the title at boot from the disc it identified. */
+extern int g_recomp_xbe_variant;
+
 /* ================================================================
  * ICALL trace ring buffer (for debugging indirect calls)
  * ================================================================ */
