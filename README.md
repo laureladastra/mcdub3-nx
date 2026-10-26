@@ -37,12 +37,12 @@ Playing on Mac or Linux, 30 FPS is consistently achieved with 5x upscale setting
 
 ## Supported Editions
 
-| File                   | Game                               | Edition                                                    |
-| ---------------------- | ---------------------------------- | ---------------------------------------------------------- |
-| mcdub3-nx-usa.nro      | Midnight Club 3: Dub Edition       | NTSC-U (English)                                           |
-| mcdub3-nx-eur.nro      | Midnight Club 3: Dub Edition       | PAL (Europe: English, French, German, Spanish, Italian)    |
-| mcdub3remix-nx-usa.nro | Midnight Club 3: Dub Edition Remix | NTSC-U (English)                                           |
-| mcdub3remix-nx-eur.nro | Midnight Club 3: Dub Edition Remix | PAL (Europe: English, French, German, Spanish, Italian)    |
+| File                   | Game                               | Edition                                                 |
+| ---------------------- | ---------------------------------- | ------------------------------------------------------- |
+| mcdub3-nx-usa.nro      | Midnight Club 3: Dub Edition       | NTSC-U (English)                                        |
+| mcdub3-nx-eur.nro      | Midnight Club 3: Dub Edition       | PAL (Europe: English, French, German, Spanish, Italian) |
+| mcdub3remix-nx-usa.nro | Midnight Club 3: Dub Edition Remix | NTSC-U (English)                                        |
+| mcdub3remix-nx-eur.nro | Midnight Club 3: Dub Edition Remix | PAL (Europe: English, French, German, Spanish, Italian) |
 
 ## Installation
 
@@ -261,7 +261,7 @@ described in the example file and in the source.
 
 ## Contributing
 
-Pull requests and issues are currently closed to write a supportive guideline to properly manage this aspect of the project and ensure valuable collaboration. Provided the open-source nature of this project, contributions are welcome again if they follow the requirements of the guideline.
+Pull requests and bug reports are currently accepted. Contact me if you want to sign up to be a permanent collaborator.
 
 ## License
 
