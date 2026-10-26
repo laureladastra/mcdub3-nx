@@ -146,6 +146,12 @@ static const uint32_t *s_regs;          /* the executor's method shadow */
  * compiled and textures uploaded, and the time spent on each. */
 static uint32_t s_hz_progs, s_hz_texs, s_hz_draws;
 static uint64_t s_hz_prog_ns, s_hz_tex_ns, s_hz_tex_bytes;
+/* Of the textures' time: GL's own upload calls, and the mip levels
+ * (glGenerateMipmap, or the title's levels uploaded); the rest is decoding
+ * and hashing. Per format, how many were made. For the race start's
+ * hundreds of uploads (2026-10-26). */
+static uint64_t s_hz_gl_ns, s_hz_mip_ns;
+static uint16_t s_hz_fmt[64];
 
 /* Where the GL thread's time goes, per phase of a draw (and the swap), for
  * the perf report (nv2a_gl_prof_stats; on with MC3_PERF or RECOMP_GL_PROF).
@@ -885,7 +891,17 @@ static void tex_set_levels(GlTex *t, uint32_t n)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, (GLint)t->mips - 1);
 }
 
+static uint64_t hz_now(void);
+#define HZ_GL(call) do { uint64_t hz_t0_ = hz_now(); call; s_hz_gl_ns += hz_now() - hz_t0_; } while (0)
+
+static void tex_mips_dxt_(GlTex *t, GLenum fmt, uint32_t size0);
 static void tex_mips_dxt(GlTex *t, GLenum fmt, uint32_t size0)
+{
+    uint64_t t0 = hz_now();
+    tex_mips_dxt_(t, fmt, size0);
+    s_hz_mip_ns += hz_now() - t0;
+}
+static void tex_mips_dxt_(GlTex *t, GLenum fmt, uint32_t size0)
 {
     const uint8_t *base = (const uint8_t *)xbox_GetMemoryOffset() + t->va;
     uint32_t l, off = size0, n = 1;
@@ -905,7 +921,14 @@ static void tex_mips_dxt(GlTex *t, GLenum fmt, uint32_t size0)
     tex_set_levels(t, n);
 }
 
+static void tex_mips_argb_(GlTex *t, const uint32_t *src, uint32_t fill);
 static void tex_mips_argb(GlTex *t, const uint32_t *src, uint32_t fill)
+{
+    uint64_t t0 = hz_now();
+    tex_mips_argb_(t, src, fill);
+    s_hz_mip_ns += hz_now() - t0;
+}
+static void tex_mips_argb_(GlTex *t, const uint32_t *src, uint32_t fill)
 {
     uint32_t l, n = 1, x, y;
     size_t off;
@@ -930,7 +953,14 @@ static void tex_mips_argb(GlTex *t, const uint32_t *src, uint32_t fill)
     tex_set_levels(t, n);
 }
 
+static void tex_mips_generate_(GlTex *t);
 static void tex_mips_generate(GlTex *t)
+{
+    uint64_t t0 = hz_now();
+    tex_mips_generate_(t);
+    s_hz_mip_ns += hz_now() - t0;
+}
+static void tex_mips_generate_(GlTex *t)
 {
     if (mips_wanted(t) && glGenerateMipmap) {
         glGenerateMipmap(GL_TEXTURE_2D);
@@ -1048,6 +1078,7 @@ static GLuint tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
     t->va = va; t->color = color; t->w = w; t->h = h; t->pitch = pitch;
     t->hash = hash; t->used = t->checked = s_frame;
     s_new_obj = 1;
+    s_hz_fmt[color & 63]++;
     if (s_trace)
         fprintf(stderr, "  [GL] texture 0x%08X format 0x%02X %ux%u pitch %u\n",
                 va, color, w, h, pitch);
@@ -1080,8 +1111,8 @@ static GLuint tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
             uint32_t size = tex_bytes(color, w, h, 0);
             bind_tex(t->tex);
             while (glGetError() != GL_NO_ERROR) { }
-            glCompressedTexImage2D(GL_TEXTURE_2D, 0, fmt, (GLsizei)w, (GLsizei)h, 0,
-                                   (GLsizei)size, (const uint8_t *)xbox_GetMemoryOffset() + va);
+            HZ_GL(glCompressedTexImage2D(GL_TEXTURE_2D, 0, fmt, (GLsizei)w, (GLsizei)h, 0,
+                                         (GLsizei)size, (const uint8_t *)xbox_GetMemoryOffset() + va));
             if (glGetError() == GL_NO_ERROR) {
                 tex_account(t, size);
                 tex_mips_dxt(t, fmt, size);
@@ -1111,8 +1142,8 @@ static GLuint tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
         for (y = 0; y < h; y++)
             for (x = 0; x < w; x++)
                 s_decode[(size_t)y * w + x] = src[s_swz_x[x] | s_swz_y[y]] | fill;
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)w, (GLsizei)h, 0,
-                     GL_BGRA, GL_UNSIGNED_BYTE, s_decode);
+        HZ_GL(glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)w, (GLsizei)h, 0,
+                           GL_BGRA, GL_UNSIGNED_BYTE, s_decode));
         tex_account(t, w * h * 4);
         tex_mips_argb(t, src, fill);
         gl_step_done("texture upload");
@@ -1133,15 +1164,15 @@ static GLuint tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
             }
             free(ref);
         }
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)w, (GLsizei)h, 0,
-                     GL_BGRA, GL_UNSIGNED_BYTE, s_decode);
+        HZ_GL(glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)w, (GLsizei)h, 0,
+                           GL_BGRA, GL_UNSIGNED_BYTE, s_decode));
         tex_account(t, w * h * 4);
         tex_mips_generate(t);
         gl_step_done("texture upload");
     } else if (s_decode && (color == 0x0B ? decode_indexed(va, w, h, s_decode)
                                     : nv2a_backend_decode_texture(&nt, s_decode))) {
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)w, (GLsizei)h, 0,
-                     GL_BGRA, GL_UNSIGNED_BYTE, s_decode);
+        HZ_GL(glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)w, (GLsizei)h, 0,
+                           GL_BGRA, GL_UNSIGNED_BYTE, s_decode));
         tex_account(t, w * h * 4);
         tex_mips_generate(t);
         gl_step_done("texture upload");
@@ -4728,14 +4759,25 @@ static void gl_flip(void)
             uint64_t dt = now - last_ns;
             if (now - window_ns > 10000000000ull) { window_ns = now; lines = 0; }
             if (dt > 50000000ull && lines++ < 30)
+            {
+                char fm[160] = "";
+                size_t k = 0;
+                int c;
+                for (c = 0; c < 64; c++)
+                    if (s_hz_fmt[c] && k < sizeof fm - 12)
+                        k += (size_t)snprintf(fm + k, sizeof fm - k, " %02X:%u", c, s_hz_fmt[c]);
                 fprintf(stderr, "[hitch] frame %u: %.0f ms -- %u programs compiled (%.0f ms),"
-                        " %u textures %.1f MB (%.0f ms), %u draws\n", s_frame, dt / 1e6,
-                        s_hz_progs, s_hz_prog_ns / 1e6, s_hz_texs,
-                        s_hz_tex_bytes / 1048576.0, s_hz_tex_ns / 1e6, s_hz_draws);
+                        " %u textures %.1f MB (%.0f ms: GL %.0f, mips %.0f), %u draws%s%s\n",
+                        s_frame, dt / 1e6, s_hz_progs, s_hz_prog_ns / 1e6, s_hz_texs,
+                        s_hz_tex_bytes / 1048576.0, s_hz_tex_ns / 1e6, s_hz_gl_ns / 1e6,
+                        s_hz_mip_ns / 1e6, s_hz_draws, fm[0] ? "; formats" : "", fm);
+            }
         }
         last_ns = now;
         s_hz_progs = s_hz_texs = s_hz_draws = 0;
         s_hz_prog_ns = s_hz_tex_ns = s_hz_tex_bytes = 0;
+        s_hz_gl_ns = s_hz_mip_ns = 0;
+        memset(s_hz_fmt, 0, sizeof s_hz_fmt);
     }
     if (s_pw_go && s_pw_file)
         prog_cache_prewarm_step(s_pw_per_frame);   /* the deferred list, a little a frame */
