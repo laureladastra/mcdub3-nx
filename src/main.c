@@ -437,6 +437,60 @@ static void *perf_thread(void *arg)
     return NULL;
 }
 
+/* MC3_HANG_SECS=<n>: a hang watch. When no frame has been presented for n
+ * seconds, the game's state goes to the log once -- the main guest
+ * thread's registers and stack (tools/stackwalk.py reads it), the recent
+ * indirect calls, the pushbuffer pointers -- and again only after frames
+ * came back and stopped anew. The game goes on running: a hang is
+ * something to look at, not to end. RECOMP_WATCHDOG_SECS is not this: a
+ * fixed timer from boot that dumps once and ends the process (on the
+ * Switch an Atmosphere crash report, 2026-10-26). Above the interrupt and
+ * APU threads on the Switch, so it gets to run while something spins. */
+static void *hang_thread(void *arg)
+{
+    unsigned secs = (unsigned)(uintptr_t)arg, still = 0;
+    uint32_t last = 0;
+    int reported = 0;
+    extern uint32_t nv2a_gl_frame_count(void);
+    extern void xbox_WatchdogDump(const char *why);
+#if defined(__SWITCH__)
+    switch_raise_thread();
+#endif
+    for (;;) {
+        uint32_t now;
+        sleep(1);
+        now = nv2a_gl_frame_count();
+        if (now != last || now == 0) {      /* 0: not drawing yet (boot) */
+            last = now;
+            still = 0;
+            reported = 0;
+            continue;
+        }
+        if (++still >= secs && !reported) {
+            char why[96];
+            snprintf(why, sizeof why, "hang: no frame presented for %us (frame %u)",
+                     still, now);
+            xbox_WatchdogDump(why);
+            reported = 1;
+        }
+    }
+    return NULL;
+}
+
+static void hang_watch_start(void)
+{
+    const char *e = getenv("MC3_HANG_SECS");
+    pthread_t th;
+    unsigned secs;
+    if (!e || (secs = (unsigned)atoi(e)) == 0)
+        return;
+    if (pthread_create(&th, NULL, hang_thread, (void *)(uintptr_t)secs) == 0) {
+        pthread_detach(th);
+        fprintf(stderr, "[hang] watching: the game's state goes to the log after %us "
+                        "without a new frame (MC3_HANG_SECS)\n", secs);
+    }
+}
+
 static void perf_report_start(void)
 {
     static double secs;
@@ -762,6 +816,7 @@ static int game_main(void)
 
     xbox_WatchdogStart();   /* inert unless RECOMP_WATCHDOG_SECS is set */
     perf_report_start();    /* inert unless MC3_PERF is set */
+    hang_watch_start();     /* inert unless MC3_HANG_SECS is set */
 #if !defined(__SWITCH__)
     {   /* SDL game controllers (a DualSense, an Xbox pad) as pads 1-4, with
          * the keyboard on top of pad 1; plugged in later, picked up within

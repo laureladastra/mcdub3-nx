@@ -200,8 +200,14 @@
 #RECOMP_IO_MBPS=
 #RECOMP_IO_SEEK_MS=
 
-# Snapshot of the main thread's stack once the game has made no progress
-# for N seconds (a hang).
+# A hang watch: when no new frame has been shown for N seconds, the game's
+# state (the main thread's registers and stack, its recent calls) goes to
+# the log, once per hang, and the game keeps running. 10 is a good value.
+#MC3_HANG_SECS=
+
+# Not for hangs: a timer from boot that dumps the stack after N seconds and
+# then ends the game, whatever it is doing (for automated boot tests on a
+# computer; on the Switch it ends in an Atmosphere crash report).
 #RECOMP_WATCHDOG_SECS=
 
 # Traces, one subsystem each (1 = on): movies (split of each frame's time),
