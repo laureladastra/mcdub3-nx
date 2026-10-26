@@ -259,10 +259,6 @@ and set by the game itself: `RECOMP_VBLANK`, `RECOMP_PB_EXEC`, `RECOMP_USB`,
 `RECOMP_APU_DSP_ACK`. Leave both groups alone. The developer traces are
 described in the example file and in the source.
 
-## Contributing
-
-Pull requests and bug reports are currently accepted. Contact me if you want to sign up to be a permanent collaborator.
-
 ## License
 
 The project's own code is under the MIT license ([LICENSE](LICENSE)). The
