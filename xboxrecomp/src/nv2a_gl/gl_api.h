@@ -30,12 +30,21 @@ typedef char          GLchar;
 typedef unsigned char GLubyte;
 typedef ptrdiff_t     GLsizeiptr;
 typedef ptrdiff_t     GLintptr;
+typedef uint64_t      GLuint64;
+typedef struct __GLsync *GLsync;
 
 #define GL_FALSE                          0
 #define GL_NO_ERROR                       0
 #define GL_MAP_WRITE_BIT                  0x0002
 #define GL_MAP_INVALIDATE_RANGE_BIT       0x0004
 #define GL_MAP_UNSYNCHRONIZED_BIT         0x0020
+#define GL_MAP_PERSISTENT_BIT             0x0040
+#define GL_MAP_COHERENT_BIT               0x0080
+#define GL_DYNAMIC_STORAGE_BIT            0x0100
+#define GL_SYNC_GPU_COMMANDS_COMPLETE     0x9117
+#define GL_SYNC_FLUSH_COMMANDS_BIT        0x00000001
+#define GL_TIMEOUT_EXPIRED                0x911B
+#define GL_WAIT_FAILED                    0x911D
 #define GL_TRUE                           1
 #define GL_NONE                           0
 #define GL_ZERO                           0
@@ -192,13 +201,18 @@ X(GLboolean, glUnmapBuffer, (GLenum)) \
     X(void, glDrawArrays, (GLenum, GLint, GLsizei))
 
 /* Optional: resolved when the driver has them, NULL otherwise (program
- * binaries, GL 4.1 / ARB_get_program_binary: the shader cache). */
+ * binaries, GL 4.1 / ARB_get_program_binary: the shader cache; buffer
+ * storage and fences, GL 4.4 / ARB_buffer_storage: persistent streaming). */
 #define NV2A_GL_OPT_FUNCS(X) \
     X(void, glGetProgramBinary, (GLuint, GLsizei, GLsizei *, GLenum *, void *)) \
     X(void, glProgramBinary, (GLuint, GLenum, const void *, GLsizei)) \
     X(void, glProgramParameteri, (GLuint, GLenum, GLint)) \
     X(void, glTexParameterf, (GLenum, GLenum, GLfloat)) \
-    X(void, glGenerateMipmap, (GLenum))
+    X(void, glGenerateMipmap, (GLenum)) \
+    X(void, glBufferStorage, (GLenum, GLsizeiptr, const void *, GLbitfield)) \
+    X(GLsync, glFenceSync, (GLenum, GLbitfield)) \
+    X(GLenum, glClientWaitSync, (GLsync, GLbitfield, GLuint64)) \
+    X(void, glDeleteSync, (GLsync))
 #define GL_TEXTURE_BASE_LEVEL             0x813C
 #define GL_TEXTURE_MAX_LEVEL              0x813D
 #define GL_TEXTURE_LOD_BIAS               0x8501
@@ -306,5 +320,9 @@ int nv2a_gl_load(void *(*getproc)(const char *name));
 #define glProgramParameteri      p_glProgramParameteri
 #define glTexParameterf          p_glTexParameterf
 #define glGenerateMipmap         p_glGenerateMipmap
+#define glBufferStorage          p_glBufferStorage
+#define glFenceSync              p_glFenceSync
+#define glClientWaitSync         p_glClientWaitSync
+#define glDeleteSync             p_glDeleteSync
 
 #endif /* NV2A_GL_API_H */

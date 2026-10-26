@@ -131,9 +131,16 @@ static void gl_step_done(const char *what)
 }
 static GLuint        s_vao, s_vbo, s_ibo;
 /* Streaming vertex / index buffers (see ring_alloc). */
-typedef struct { GLuint buf; GLenum target; GLsizeiptr cap, off; } GlRing;
+#define RING_SEGS 4
+typedef struct {
+    GLuint buf; GLenum target; GLsizeiptr cap, off;
+    uint8_t *pmap;              /* persistent mapping (ring_persist), or NULL */
+    GLsync fence[RING_SEGS];    /* per quarter: the GPU's last use of it */
+    int seg;                    /* the quarter being filled */
+} GlRing;
 static GlRing s_vring = { 0, GL_ARRAY_BUFFER, 16 << 20, 0 };
 static GlRing s_iring = { 0, GL_ELEMENT_ARRAY_BUFFER, 4 << 20, 0 };
+static int ring_persist(GlRing *g);
 static const uint32_t *s_regs;          /* the executor's method shadow */
 /* Hitch accounting (gl_flip logs frames over 50 ms): per frame, programs
  * compiled and textures uploaded, and the time spent on each. */
@@ -619,6 +626,47 @@ static uint32_t bytes_hash_full(uint32_t va, uint32_t bytes)
     return (uint32_t)(h0 ^ (h0 >> 32));
 }
 
+static uint32_t tex_bytes(uint32_t color, uint32_t w, uint32_t h, uint32_t pitch);
+
+/* Bytes a texel of a swizzled format takes (0 for DXT and linear images). */
+static uint32_t tex_texel_bytes(uint32_t color)
+{
+    switch (color) {
+    case 0x00: case 0x01: case 0x0B: case 0x19:                       /* L8 AY8 I8 A8 */
+        return 1;
+    case 0x02: case 0x03: case 0x04: case 0x05:                       /* 16-bit RGB */
+    case 0x1A: case 0x27: case 0x28: case 0x29:                       /* A8Y8 R6G5B5 G8B8 R8B8 */
+    case 0x2C: case 0x2D:                                             /* D16, F16 */
+        return 2;
+    default:
+        return 4;
+    }
+}
+
+/* The bytes that are the texture's own: level 0 at its real size, and the
+ * title's mip levels after it. The change check hashed tex_bytes -- 4 bytes
+ * a texel whatever the format -- so a 1- or 2-byte texture took in the
+ * memory after it, a neighbour's changes made it "rewritten", and from then
+ * on it was hashed in full at every use and re-decoded and uploaded at
+ * every change of that neighbour: ~1.8 textures, 6 ms a frame in an MC3
+ * race on the Switch (2026-10-26). */
+static uint32_t tex_own_bytes(uint32_t color, uint32_t w, uint32_t h,
+                              uint32_t pitch, uint32_t levels)
+{
+    uint32_t total = 0, l, bpp;
+    if (pitch)
+        return pitch * h;                                           /* linear */
+    bpp = (color >= 0x0C && color <= 0x0F) ? 0 : tex_texel_bytes(color);
+    if (levels < 1) levels = 1;
+    for (l = 0; l < levels && l < 13; l++) {
+        uint32_t lw = w >> l ? w >> l : 1, lh = h >> l ? h >> l : 1;
+        total += bpp ? lw * lh * bpp : tex_bytes(color, lw, lh, 0);
+        if (lw == 1 && lh == 1)
+            break;
+    }
+    return total;
+}
+
 static uint32_t tex_bytes(uint32_t color, uint32_t w, uint32_t h, uint32_t pitch)
 {
     if (color == 0x0C) return ((w + 3) / 4) * ((h + 3) / 4) * 8;
@@ -642,6 +690,20 @@ static uint32_t swizzle_index(uint32_t u, uint32_t v, uint32_t w, uint32_t h)
     return out;
 }
 
+/* Morton order per axis: a texel's index is sx[x] | sy[y], the bits of x
+ * and y interleaving independently -- one table pass per texture instead of
+ * swizzle_index's bit loop per texel (~18 steps at 512x512) in every
+ * decode. */
+static uint32_t s_swz_x[4096], s_swz_y[4096];
+static void swizzle_tables(uint32_t w, uint32_t h)
+{
+    uint32_t i;
+    for (i = 0; i < w && i < 4096; i++)
+        s_swz_x[i] = swizzle_index(i, 0, w, h);
+    for (i = 0; i < h && i < 4096; i++)
+        s_swz_y[i] = swizzle_index(0, i, w, h);
+}
+
 /* SZ_I8_A8R8G8B8: 8-bit indices, swizzled, into an A8R8G8B8 palette named by
  * SET_TEXTURE_PALETTE (offset in the upper bits, length code in [3:2]:
  * 256, 128, 64 or 32 entries). The executor's decoder has no palette state,
@@ -659,15 +721,78 @@ static int decode_indexed(uint32_t va, uint32_t w, uint32_t h, uint32_t *out)
 
     if (!(s_palette_reg & ~0x3Fu))
         return 0;
+    swizzle_tables(w, h);
     for (y = 0; y < h; y++)
         for (x = 0; x < w; x++) {
-            uint32_t i = idx[swizzle_index(x, y, w, h)];
+            uint32_t i = idx[s_swz_x[x] | s_swz_y[y]];
             uint32_t c;
             if (i >= entries)
                 i = 0;
             memcpy(&c, mem + pal_va + i * 4, 4);
             out[y * w + x] = c;
         }
+    return 1;
+}
+
+/* n bits of colour scaled to 8, as the executor's decoder does
+ * (d3d8_expand_channel): the same texels either way. */
+static inline uint32_t bits8(uint32_t v, int n)
+{
+    return v * 255u / ((1u << n) - 1u);
+}
+
+/* Swizzled A1R5G5B5, X1R5G5B5, A4R4G4B4, R5G6B5, L8 and A8 to A8R8G8B8,
+ * with the conversions of nv2a_backend_decode_texture (sample_texture).
+ * 0 for any other format. */
+static int decode_swizzled_small(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
+                                 uint32_t *out)
+{
+    const uint8_t *mem = (const uint8_t *)xbox_GetMemoryOffset() + va;
+    const uint16_t *m16 = (const uint16_t *)mem;
+    uint32_t x, y;
+    if (!(color <= 0x05 && color != 0x01) && color != 0x19)
+        return 0;
+    if (w > 4096 || h > 4096)
+        return 0;
+    swizzle_tables(w, h);
+    for (y = 0; y < h; y++) {
+        uint32_t *row = out + (size_t)y * w, sy = s_swz_y[y];
+        switch (color) {
+        case 0x02:                                      /* A1R5G5B5 */
+        case 0x03:                                      /* X1R5G5B5 */
+            for (x = 0; x < w; x++) {
+                uint32_t t = m16[s_swz_x[x] | sy];
+                row[x] = (color == 0x03 || (t & 0x8000u) ? 0xFF000000u : 0u)
+                       | (bits8((t >> 10) & 0x1F, 5) << 16)
+                       | (bits8((t >> 5) & 0x1F, 5) << 8) | bits8(t & 0x1F, 5);
+            }
+            break;
+        case 0x04:                                      /* A4R4G4B4 */
+            for (x = 0; x < w; x++) {
+                uint32_t t = m16[s_swz_x[x] | sy];
+                row[x] = (bits8((t >> 12) & 0xF, 4) << 24) | (bits8((t >> 8) & 0xF, 4) << 16)
+                       | (bits8((t >> 4) & 0xF, 4) << 8) | bits8(t & 0xF, 4);
+            }
+            break;
+        case 0x05:                                      /* R5G6B5 */
+            for (x = 0; x < w; x++) {
+                uint32_t t = m16[s_swz_x[x] | sy];
+                row[x] = 0xFF000000u | (bits8((t >> 11) & 0x1F, 5) << 16)
+                       | (bits8((t >> 5) & 0x3F, 6) << 8) | bits8(t & 0x1F, 5);
+            }
+            break;
+        case 0x00:                                      /* L8 */
+            for (x = 0; x < w; x++) {
+                uint32_t t = mem[s_swz_x[x] | sy];
+                row[x] = 0xFF000000u | (t << 16) | (t << 8) | t;
+            }
+            break;
+        case 0x19:                                      /* A8 */
+            for (x = 0; x < w; x++)
+                row[x] = ((uint32_t)mem[s_swz_x[x] | sy] << 24) | 0x00FFFFFFu;
+            break;
+        }
+    }
     return 1;
 }
 
@@ -788,9 +913,10 @@ static void tex_mips_argb(GlTex *t, const uint32_t *src, uint32_t fill)
         for (l = 1; l < t->levels; l++) {
             uint32_t lw = t->w >> l ? t->w >> l : 1, lh = t->h >> l ? t->h >> l : 1;
             const uint32_t *ls = src + off;
+            swizzle_tables(lw, lh);
             for (y = 0; y < lh; y++)
                 for (x = 0; x < lw; x++)
-                    s_decode[(size_t)y * lw + x] = ls[swizzle_index(x, y, lw, lh)] | fill;
+                    s_decode[(size_t)y * lw + x] = ls[s_swz_x[x] | s_swz_y[y]] | fill;
             glTexImage2D(GL_TEXTURE_2D, (GLint)l, GL_RGBA8, (GLsizei)lw, (GLsizei)lh, 0,
                          GL_BGRA, GL_UNSIGNED_BYTE, s_decode);
             off += (size_t)lw * lh;
@@ -863,8 +989,8 @@ static GLuint tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
     /* Linear images (movies, UI, CPU-drawn) in full; swizzled ones, mostly
      * static game textures, sampled -- in full once they have changed. */
     hash = tex_size_from_format(color) && !(t && t->rewrites)
-               ? bytes_hash(va, tex_bytes(color, w, h, pitch))
-               : bytes_hash_full(va, tex_bytes(color, w, h, pitch));
+               ? bytes_hash(va, tex_own_bytes(color, w, h, pitch, levels))
+               : bytes_hash_full(va, tex_own_bytes(color, w, h, pitch, levels));
     if (color == 0x0B)                       /* the palette is content too */
         hash ^= bytes_hash(s_palette_va, 1024) * 31u;
     static unsigned probe_tex_n;
@@ -980,13 +1106,36 @@ static GLuint tex_get(uint32_t va, uint32_t color, uint32_t w, uint32_t h,
          * instead of a sampler call per texel. */
         const uint32_t *src = (const uint32_t *)((const uint8_t *)xbox_GetMemoryOffset() + va);
         uint32_t x, y, fill = color == 0x07 ? 0xFF000000u : 0;
+        swizzle_tables(w, h);
         for (y = 0; y < h; y++)
             for (x = 0; x < w; x++)
-                s_decode[(size_t)y * w + x] = src[swizzle_index(x, y, w, h)] | fill;
+                s_decode[(size_t)y * w + x] = src[s_swz_x[x] | s_swz_y[y]] | fill;
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)w, (GLsizei)h, 0,
                      GL_BGRA, GL_UNSIGNED_BYTE, s_decode);
         tex_account(t, w * h * 4);
         tex_mips_argb(t, src, fill);
+        gl_step_done("texture upload");
+    } else if (s_decode && decode_swizzled_small(va, color, w, h, s_decode)) {
+        /* Swizzled 16- and 8-bit formats: one loop, not a sampler call per
+         * texel (nv2a_backend_decode_texture). The same conversions;
+         * RECOMP_GL_DECODE_CHECK=1 decodes each both ways and compares. */
+        static int check = -1;
+        if (check < 0)
+            check = getenv("RECOMP_GL_DECODE_CHECK") != NULL;
+        if (check) {
+            uint32_t *ref = (uint32_t *)malloc((size_t)w * h * 4), k, bad = 0;
+            if (ref && nv2a_backend_decode_texture(&nt, ref)) {
+                for (k = 0; k < w * h; k++)
+                    bad += ref[k] != s_decode[k];
+                fprintf(stderr, "  [GL] decode check fmt 0x%02X %ux%u: %u of %u texels differ\n",
+                        color, w, h, bad, w * h);
+            }
+            free(ref);
+        }
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)w, (GLsizei)h, 0,
+                     GL_BGRA, GL_UNSIGNED_BYTE, s_decode);
+        tex_account(t, w * h * 4);
+        tex_mips_generate(t);
         gl_step_done("texture upload");
     } else if (s_decode && (color == 0x0B ? decode_indexed(va, w, h, s_decode)
                                     : nv2a_backend_decode_texture(&nt, s_decode))) {
@@ -3021,10 +3170,14 @@ static int ready(void)
     glGenBuffers(1, &s_ibo);
     s_vring.buf = s_vbo;
     s_iring.buf = s_ibo;
-    glBindBuffer(GL_ARRAY_BUFFER, s_vbo);
-    glBufferData(GL_ARRAY_BUFFER, s_vring.cap, NULL, GL_STREAM_DRAW);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, s_ibo);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, s_iring.cap, NULL, GL_STREAM_DRAW);
+    if (!ring_persist(&s_vring)) {           /* each on its own: storage is immutable */
+        glBindBuffer(GL_ARRAY_BUFFER, s_vbo);
+        glBufferData(GL_ARRAY_BUFFER, s_vring.cap, NULL, GL_STREAM_DRAW);
+    }
+    if (!ring_persist(&s_iring)) {
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, s_ibo);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, s_iring.cap, NULL, GL_STREAM_DRAW);
+    }
     s_state = 1;
     prog_cache_prewarm();
     return 1;
@@ -3267,11 +3420,84 @@ static uint32_t zmax_of(const uint32_t *r)
 
 /* Space for `size` bytes; returns the offset, and a pointer to write them to
  * (NULL if mapping failed: then ring_put the data instead). */
+/* Persistent streaming (GL 4.4 / ARB_buffer_storage; RECOMP_GL_PERSIST=0
+ * off): each buffer is immutable storage mapped once, for good, and a draw
+ * writes straight into it -- no map and unmap per draw. On the Switch those
+ * two calls per buffer per draw were a good part of the "vertices" phase
+ * (10.5 ms of a 55 ms race frame, 2026-10-26). The buffer is used in
+ * quarters: leaving one fences it, entering one waits for its fence, so
+ * nothing the GPU may still read is written over. */
+static void ring_enter(GlRing *g, int s)
+{
+    if (g->fence[g->seg] == NULL)
+        g->fence[g->seg] = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    if (g->fence[s]) {
+        glClientWaitSync(g->fence[s], GL_SYNC_FLUSH_COMMANDS_BIT, 1000000000ull);
+        glDeleteSync(g->fence[s]);
+        g->fence[s] = NULL;
+    }
+    g->seg = s;
+}
+
+static int ring_persist(GlRing *g)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("RECOMP_GL_PERSIST");
+        on = !(e && *e == '0') && glBufferStorage && glFenceSync && glClientWaitSync
+             && glDeleteSync && SDL_GL_ExtensionSupported("GL_ARB_buffer_storage");
+        fprintf(stderr, "  [GL] streaming buffers: %s\n",
+                on ? "persistent mapping (ARB_buffer_storage)" : "mapped per draw");
+    }
+    if (!on)
+        return 0;
+    glBindBuffer(g->target, g->buf);
+    glBufferStorage(g->target, g->cap, NULL,
+                    GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT
+                    | GL_DYNAMIC_STORAGE_BIT);
+    g->pmap = (uint8_t *)glMapBufferRange(g->target, 0, g->cap,
+                                          GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT
+                                          | GL_MAP_COHERENT_BIT);
+    g->off = 0;
+    g->seg = 0;
+    return g->pmap != NULL;
+}
+
 static GLintptr ring_alloc(GlRing *g, GLsizeiptr size, void **ptr)
 {
     GLintptr at;
 
     glBindBuffer(g->target, g->buf);
+    if (g->pmap && size <= g->cap / RING_SEGS) {
+        GLsizeiptr q = g->cap / RING_SEGS;
+        int end;
+        at = (g->off + 63) & ~(GLintptr)63;
+        if (at + size > g->cap) {           /* wrap: through the rest to 0 */
+            while (g->seg != RING_SEGS - 1)
+                ring_enter(g, g->seg + 1);
+            ring_enter(g, 0);
+            at = 0;
+        }
+        end = (int)((at + size - 1) / q);
+        while (g->seg != end)
+            ring_enter(g, g->seg + 1);
+        g->off = at + size;
+        *ptr = g->pmap + at;
+        return at;
+    }
+    if (g->pmap) {
+        /* Bigger than a quarter (never seen): the whole buffer is waited
+         * for, then the data copied to its start; the ring goes on after. */
+        int k;
+        for (k = 0; k < RING_SEGS; k++)
+            ring_enter(g, (g->seg + 1) % RING_SEGS);
+        if (size > g->cap)
+            size = g->cap;
+        g->seg = (int)((size - 1) / (g->cap / RING_SEGS));
+        g->off = size;
+        *ptr = NULL;
+        return 0;
+    }
     if (size > g->cap) {
         g->cap = size * 2;
         g->off = g->cap;                    /* forces the orphan below */
@@ -3310,6 +3536,8 @@ static GLintptr ring_alloc(GlRing *g, GLsizeiptr size, void **ptr)
 static void ring_done(GlRing *g, GLintptr at, GLsizeiptr size, void *ptr,
                       const void *fallback)
 {
+    if (ptr && g->pmap)
+        return;                             /* persistent: written in place */
     if (ptr)
         glUnmapBuffer(g->target);
     else if (fallback)
