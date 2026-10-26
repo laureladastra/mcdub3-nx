@@ -4758,7 +4758,10 @@ static void gl_flip(void)
         if (last_ns) {
             uint64_t dt = now - last_ns;
             if (now - window_ns > 10000000000ull) { window_ns = now; lines = 0; }
-            if (dt > 50000000ull && lines++ < 30)
+            /* At most 30 lines per 10 s -- a slow stretch of 50-60 ms frames
+             * used them all up and a stall of several hundred ms in it went
+             * unlogged (2026-10-26) -- except frames over 150 ms: always. */
+            if (dt > 50000000ull && (lines++ < 30 || dt > 150000000ull))
             {
                 char fm[160] = "";
                 size_t k = 0;
