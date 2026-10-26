@@ -157,6 +157,7 @@ static const char *const s_pf_name[PF_N] = {
 static int s_pf_on = -1;
 static uint64_t s_pf_ns[PF_N], s_pf_t;
 static uint32_t s_pf_draws, s_pf_frames, s_pf_verts, s_pf_idx;
+static uint32_t s_pf_cdraws, s_pf_crows, s_pf_udraws;   /* constants / other uniforms changed */
 static uint64_t hz_now(void)
 {
     struct timespec ts;
@@ -3803,8 +3804,10 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
      * only when they changed since this program last got them. */
     if (p->u_c >= 0 && !(p->vpc_valid && p->vpc_gen == b->vp_const_gen)) {
         /* Same executor version: same contents, no compare needed. */
+        s_pf_cdraws++;
         if (!p->vpc_valid || !p->vpc_rows) {
             memcpy(p->vpc, b->vp_consts, sizeof p->vpc);
+            s_pf_crows += (uint32_t)p->n_c;
             glUniform4fv(p->u_c, p->n_c, &b->vp_consts[0][0]);
         } else {
             /* Only the rows that changed, as runs: a draw usually changes a
@@ -3816,6 +3819,7 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
                 if (!memcmp(p->vpc[r], b->vp_consts[r], 16)) { r++; continue; }
                 for (e = r + 1; e < p->n_c && memcmp(p->vpc[e], b->vp_consts[e], 16); e++) { }
                 memcpy(p->vpc[r], b->vp_consts[r], (size_t)(e - r) * 16);
+                s_pf_crows += (uint32_t)(e - r);
                 glUniform4fv(p->u_c + r, e - r, &b->vp_consts[r][0]);
                 r = e;
             }
@@ -3845,6 +3849,7 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
             nv2a_ffp_fog_uniforms(r, u.mv, u.fogplane, u.fog0, u.fog1);
         u.afunc = r[0x300 / 4] ? (GLint)r[0x33C / 4] : 0x207;
         if (!p->uni_valid || memcmp(&u, &p->uni, sizeof u) != 0) {
+            s_pf_udraws++;
             p->uni = u;
             p->uni_valid = 1;
             if (p->u_surf >= 0) glUniform4fv(p->u_surf, 1, u.surf);
@@ -5334,12 +5339,15 @@ void nv2a_gl_prof_stats(double secs, char *out, size_t n)
         if (n) out[0] = 0;
         return;
     }
-    k = (size_t)snprintf(out, n, "%u frames, per frame: %u draws (%u verts, %u indices); ms:",
-                         s_pf_frames, s_pf_draws / fr, s_pf_verts / fr, s_pf_idx / fr);
+    k = (size_t)snprintf(out, n, "%u frames, per frame: %u draws (%u verts, %u indices), "
+                         "%u with new constants (%u rows), %u new uniforms; ms:",
+                         s_pf_frames, s_pf_draws / fr, s_pf_verts / fr, s_pf_idx / fr,
+                         s_pf_cdraws / fr, s_pf_crows / fr, s_pf_udraws / fr);
     for (i = 0; i < PF_N && k < n; i++)
         k += (size_t)snprintf(out + k, n - k, " %s %.1f", s_pf_name[i], s_pf_ns[i] / 1e6 / fr);
     memset(s_pf_ns, 0, sizeof s_pf_ns);
     s_pf_draws = s_pf_frames = s_pf_verts = s_pf_idx = 0;
+    s_pf_cdraws = s_pf_crows = s_pf_udraws = 0;
 }
 
 void nv2a_gl_queue_stats(double secs, int *gl_idle_pct, int *exec_wait_pct)
