@@ -139,11 +139,39 @@ static const uint32_t *s_regs;          /* the executor's method shadow */
  * compiled and textures uploaded, and the time spent on each. */
 static uint32_t s_hz_progs, s_hz_texs, s_hz_draws;
 static uint64_t s_hz_prog_ns, s_hz_tex_ns, s_hz_tex_bytes;
+
+/* Where the GL thread's time goes, per phase of a draw (and the swap), for
+ * the perf report (nv2a_gl_prof_stats; on with MC3_PERF or RECOMP_GL_PROF).
+ * On the Switch a race is ~2,400 draws a frame and the GL thread is the
+ * limit (idle 0%, 2026-10-25): this says which part of a draw costs. */
+enum { PF_SURF, PF_PROG, PF_TEX, PF_UNIF, PF_STATE, PF_VTX, PF_DRAW, PF_SWAP, PF_N };
+static const char *const s_pf_name[PF_N] = {
+    "surface", "program", "textures", "uniforms", "state", "vertices", "draw", "swap" };
+static int s_pf_on = -1;
+static uint64_t s_pf_ns[PF_N], s_pf_t;
+static uint32_t s_pf_draws, s_pf_frames, s_pf_verts, s_pf_idx;
 static uint64_t hz_now(void)
 {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+static inline void pf_start(void)
+{
+    if (s_pf_on < 0)
+        s_pf_on = getenv("MC3_PERF") != NULL || getenv("RECOMP_GL_PROF") != NULL;
+    if (s_pf_on)
+        s_pf_t = hz_now();
+}
+
+static inline void pf_mark(int phase)
+{
+    if (s_pf_on > 0) {
+        uint64_t now = hz_now();
+        s_pf_ns[phase] += now - s_pf_t;
+        s_pf_t = now;
+    }
 }
 static GLuint        s_cur_prog;         /* what glUseProgram last got */
 static void state_dirty(void);
@@ -3467,7 +3495,9 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
     s_regs = r;
     s_batch = b;
     depth_tex_prepare(r, b);
+    pf_start();
     s = surf_bind(&b->surface, b->zeta_va);
+    pf_mark(PF_SURF);
     if (!s)
         return;
     s_drew_any = 1;
@@ -3512,6 +3542,7 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
         glUseProgram(p->prog);
         s_cur_prog = p->prog;
     }
+    pf_mark(PF_PROG);
 
     {
         uint32_t texs = s_hz_texs;
@@ -3521,6 +3552,7 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
         if (s_hz_texs != texs)
             s_hz_tex_ns += hz_now() - t0;
     }
+    pf_mark(PF_TEX);
     for (i = 0; i < 8; i++) {
         argb_vec4(r[0xA60 / 4 + i], c0[i]);
         argb_vec4(r[0xA80 / 4 + i], c1[i]);
@@ -3856,7 +3888,9 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
         }
     }
 
+    pf_mark(PF_UNIF);
     apply_state(r, b->zeta_va != 0, s);
+    pf_mark(PF_STATE);
 
     glBindVertexArray(s_vao);
     if (!upload_vertices(b))
@@ -3924,7 +3958,14 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
                     draws, s->va, s->w, s->h, b->prim, n, b->vertex_count,
                     b->attr_present, b->xform, b->vp_start, pk.shader_program, pk.control,
                     r[0x1B00 / 4], (r[0x1B04 / 4] >> 8) & 0xFF);
+        pf_mark(PF_VTX);
         glDrawElements(mode, (GLsizei)n, idx_type, (const void *)(uintptr_t)idx_at);
+        pf_mark(PF_DRAW);
+        if (s_pf_on > 0) {
+            s_pf_draws++;
+            s_pf_verts += b->vertex_count;
+            s_pf_idx += n;
+        }
         gl_step_done("draw");
         if (s_watch_hit)
             watch_shot(s);
@@ -4636,7 +4677,11 @@ swap:
         state_dirty();
     }
     gl_step_done("present");
+    pf_start();
     SDL_GL_SwapWindow(s_win);
+    pf_mark(PF_SWAP);
+    if (s_pf_on > 0)
+        s_pf_frames++;
     gl_step_done("swap");
     tex_bind_forget();
     {
@@ -5048,6 +5093,27 @@ static void *q_gl_thread(void *arg)
 
 /* Share of the last `secs` the GL thread sat idle and the executor was held
  * back by the queue; -1 when the GL thread is off. */
+/* One line for the perf report: per frame shown, the draws and how many
+ * ms each phase of them took on the GL thread (the rest of its busy time is
+ * clears, blits, the present pass, queue handling). Resets the counts. */
+void nv2a_gl_prof_stats(double secs, char *out, size_t n)
+{
+    uint32_t fr = s_pf_frames ? s_pf_frames : 1;
+    size_t k;
+    int i;
+    (void)secs;
+    if (s_pf_on <= 0) {
+        if (n) out[0] = 0;
+        return;
+    }
+    k = (size_t)snprintf(out, n, "%u frames, per frame: %u draws (%u verts, %u indices); ms:",
+                         s_pf_frames, s_pf_draws / fr, s_pf_verts / fr, s_pf_idx / fr);
+    for (i = 0; i < PF_N && k < n; i++)
+        k += (size_t)snprintf(out + k, n - k, " %s %.1f", s_pf_name[i], s_pf_ns[i] / 1e6 / fr);
+    memset(s_pf_ns, 0, sizeof s_pf_ns);
+    s_pf_draws = s_pf_frames = s_pf_verts = s_pf_idx = 0;
+}
+
 void nv2a_gl_queue_stats(double secs, int *gl_idle_pct, int *exec_wait_pct)
 {
     if (!s_q_on) {
