@@ -395,6 +395,13 @@ static void *perf_thread(void *arg)
             if (idle >= 0)
                 fprintf(stderr, "[perf] GL thread idle %d%%, executor held back by it %d%%\n",
                         idle, held);
+            {   /* where the GL thread's time goes, per phase of a draw */
+                extern void nv2a_gl_prof_stats(double secs, char *out, size_t n);
+                char gl[320];
+                nv2a_gl_prof_stats(secs, gl, sizeof gl);
+                if (gl[0])
+                    fprintf(stderr, "[perf] GL %s\n", gl);
+            }
         }
         {   /* D3D's flip queue (sub_003E4EF0 retires entry i when the vblank
              * count +0x1C0 reaches its target +0x178+12i): target - count is
