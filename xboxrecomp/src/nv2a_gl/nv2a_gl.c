@@ -29,7 +29,8 @@
  *                                    the first draws into / sampling that VA
  *   RECOMP_GL_SCALE=<k>              render surfaces at k times the title's
  *                                    resolution, fractions allowed (1.5;
- *                                    0.5..4, default 1)
+ *                                    0.5..10 on desktops, ..5 on the Switch;
+ *                                    default 1)
  *   RECOMP_GL_SHARED_Z=0             depth buffer per colour surface instead of
  *                                    per zeta address (the old behaviour)
  */
@@ -264,7 +265,16 @@ static uint32_t s_zseq;
 static GlDepth s_depth[GL_MAX_DEPTH];
 static int     s_shared_z = -1;         /* RECOMP_GL_SHARED_Z=0: old behaviour */
 
-/* RECOMP_GL_SCALE: render resolution multiple (0.5..4, fractions allowed).
+/* The largest RECOMP_GL_SCALE and RECOMP_GL_UI_SCALE: 10 on desktops (7200
+ * x 4800 for the title's 720 x 480, within every desktop driver's 16384
+ * limit), 5 on the Switch (3600 x 2400, already more than its GPU fills). */
+#if defined(__SWITCH__)
+#define GL_SCALE_MAX 5
+#else
+#define GL_SCALE_MAX 10
+#endif
+
+/* RECOMP_GL_SCALE: render resolution multiple (0.5..GL_SCALE_MAX, fractions allowed).
  * Everything the title sees stays at its own size; only the pixels behind a
  * surface grow, so the viewport, clear rectangles, read-backs and the
  * present blit scale and nothing else does. Capped per surface by the
@@ -836,7 +846,20 @@ static void tex_account(GlTex *t, uint32_t bytes)
     static uint64_t budget;
     if (!budget) {
         const char *e = getenv("RECOMP_GL_TEX_MB");
-        budget = (uint64_t)(e && atoi(e) > 0 ? atoi(e) : 256) << 20;
+        /* 256 MB; more on a desktop with UI art upscaled past 4x: a
+         * 256 x 256 dial is 26 MB at 10x, and a budget smaller than the
+         * HUD's copies would evict and remake them every frame. */
+        uint64_t dflt = 256;
+#if !defined(__SWITCH__)
+        {
+            const char *u = getenv("RECOMP_GL_UI_SCALE");   /* as ui_eligible reads it */
+            uint64_t ui = u ? (uint64_t)atoi(u) : 2;
+            if (ui > GL_SCALE_MAX) ui = GL_SCALE_MAX;
+            if (ui > 4)
+                dflt = 256 + ui * ui * 16;                   /* 10x: 1856 MB */
+        }
+#endif
+        budget = (uint64_t)(e && atoi(e) > 0 ? (uint64_t)atoi(e) : dflt) << 20;
     }
     s_tex_bytes += (uint64_t)bytes - t->bytes;
     t->bytes = bytes;
@@ -1340,7 +1363,7 @@ static int ui_eligible(const GlTex *t)
         const char *e = getenv("RECOMP_GL_UI_SCALE");
         s_ui_scale = e ? atoi(e) : 2;
         if (s_ui_scale < 1) s_ui_scale = 1;
-        if (s_ui_scale > 5) s_ui_scale = 5;
+        if (s_ui_scale > GL_SCALE_MAX) s_ui_scale = GL_SCALE_MAX;
         fprintf(stderr, "  [GL] UI art upscaled %dx (RECOMP_GL_UI_SCALE)\n", s_ui_scale);
     }
     if (s_ui_scale <= 1 || t->levels > 1 || t->pitch)       /* pitch: linear */
@@ -3179,7 +3202,7 @@ static int ready(void)
         GLint mt = 0, mr = 0;
         double k = e ? strtod(e, NULL) : 1.0;
         if (!(k > 0.0)) k = 1.0;                    /* unset, 0 or garbage */
-        s_scale = k < 0.5 ? 0.5 : k > 5.0 ? 5.0 : k;   /* 5: 3600x2400, a 4K screen */
+        s_scale = k < 0.5 ? 0.5 : k > GL_SCALE_MAX ? GL_SCALE_MAX : k;
         glGetIntegerv(0x0D33, &mt);                 /* GL_MAX_TEXTURE_SIZE */
         glGetIntegerv(0x84E8, &mr);                 /* GL_MAX_RENDERBUFFER_SIZE */
         s_max_size = mt > 0 && mr > 0 ? (mt < mr ? mt : mr) : 4096;
