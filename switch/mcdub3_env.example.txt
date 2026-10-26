@@ -14,10 +14,9 @@
 # Picture
 # ============================================================================
 
-# Rendering resolution as a multiple of the Xbox's 720x480 (0.5 .. 5 on the
-# Switch, .. 10 on Mac, Linux and Windows; fractions allowed). 1.5 gives
-# 1280x720, the sweet spot for a 720p screen. Higher looks sharper but costs
-# frame rate on the Switch.
+# Rendering resolution as a multiple of the Xbox's 720x480 (0.5 .. 5).
+# 1.5 gives 1280x720, the sweet spot for a 720p screen. Higher looks sharper
+# but costs frame rate on the Switch.
 #RECOMP_GL_SCALE=1
 
 # Tell the game the TV is widescreen: it then renders 16:9 itself.
@@ -59,9 +58,8 @@
 # Texture detail bias: negative = sharper, positive = softer.
 #RECOMP_GL_LOD_BIAS=-0.25
 
-# Menu and HUD art redrawn N times larger on the GPU (whole numbers only:
-# 1.5 reads as 1, which is off; up to 5 on the Switch, 10 on Mac, Linux and
-# Windows; match RECOMP_GL_SCALE rounded up).
+# Menu and HUD art redrawn N times larger on the GPU (whole numbers,
+# 1 = off, up to 5; match RECOMP_GL_SCALE rounded up).
 #RECOMP_GL_UI_SCALE=2
 
 # The motion blur reads the depth buffer (0 = the old, wrong blur; for

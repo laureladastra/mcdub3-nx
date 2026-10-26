@@ -154,7 +154,7 @@ For developers: `make` and the other tools come with MSYS2 and only work in its 
 | Mac or Linux, from the repo | 1 / 2                          | `make run RECOMP_GL_SCALE=2 RECOMP_GL_UI_SCALE=3`                                                                                                                                                           |
 | Nintendo Switch             | 1 / 2                          | `RECOMP_GL_SCALE=1.5` in `sdmc:/switch/mcdub3-nx/mcdub3_env.txt`; stay at `1.5` or below there                                                                                                              |
 
-A setting in `mcdub3_env.txt` always wins over what the app was built with. Both go up to **10** on Mac, Linux and Windows (`RECOMP_GL_SCALE=10` renders at 7200x4800) and up to 5 on the Switch. `RECOMP_GL_SCALE` takes fractions (`1.5`); `RECOMP_GL_UI_SCALE` only whole numbers (`1.5` reads as 1, which is off).
+A setting in `mcdub3_env.txt` always wins over what the app was built with.
 
 ## Saves
 
