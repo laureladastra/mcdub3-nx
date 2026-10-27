@@ -53,7 +53,8 @@ if [ "${VULKAN:-0}" = "1" ]; then
     NVK_SDK="${NVK_SDK:-$MC3_WORK/deps/mesa-sdk/usr/local}"
     GLSLANG_DIR="${GLSLANG_DIR:-$MC3_REPO/work-dub/deps/glslang-switch}"
     [ -f "$NVK_SDK/lib/libvulkan.a" ] || mc3_fail "VULKAN=1 needs NVK (lib/libvulkan.a) in $NVK_SDK: build with make switch-vk (its image has it)"
-    [ -f "$GLSLANG_DIR/lib/cmake/glslang/glslangConfig.cmake" ] \
+    [ -f "$GLSLANG_DIR/lib/cmake/glslang/glslang-config.cmake" ] \
+        || [ -f "$GLSLANG_DIR/lib/cmake/glslang/glslangConfig.cmake" ] \
         || mc3_fail "VULKAN=1 needs glslang for the Switch in $GLSLANG_DIR: make glslang-switch (once)"
     ARGS=(-DMC3_VULKAN=ON -DNVK_SDK="$NVK_SDK" -Dglslang_DIR="$GLSLANG_DIR/lib/cmake/glslang")
 fi
