@@ -1718,6 +1718,76 @@ void sub_00020B60(void)
         fprintf(stderr, "[STATE] %u -> %u\n", before, MEM32(obj + 4));
 }
 
+/* ── DirectSound: stopping a voice while the APU waits for us ──
+ *
+ * sub_00391540 waits for a voice to stop: while the voice's flags (+0x12)
+ * have 0x8000, sub_00391540 calls sub_003908C3, which reads the system time
+ * and, 500 ms after the stop was asked for (+0x78), stops the voice itself
+ * (sub_003907DA). The APU says "stopped" through its front end; when the
+ * front end is trapped, it waits for DirectSound's interrupt handler, which
+ * runs on the same emulated interrupt thread that is in this loop -- on the
+ * Xbox the interrupt would pre-empt it. So the loop ran out its 500 ms
+ * holding the guest lock: the main thread stood still for 499 ms
+ * ([gil] ... held by thread 1007 (timer)), the hangs in races (Switch,
+ * 2026-10-27; samples at 0x00391552 / 0x003908D5). Now the loop is the
+ * same, except that once the front end has been trapped for
+ * MC3_VOICE_STOP_MS (1) of it, the voice is stopped as DirectSound does
+ * at its timeout. MC3_VOICE_STOP_MS=0: the original loop. */
+extern int mcpx_apu_fe_trapped(void);
+extern void sub_00391540_gen(void);
+extern void sub_003908C3(void);
+extern void sub_003907DA(void);
+static uint64_t voice_ms_now(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
+}
+static void voice_call(void (*fn)(void), uint32_t voice)
+{
+    g_esp -= 4; MEM32(g_esp) = 0;          /* return address; thiscall, no arguments */
+    g_ecx = voice;
+    fn();                                  /* ret: pops it */
+}
+void sub_00391540(void)
+{
+    static int ms = -1, logged;
+    uint32_t v = g_ecx;
+    uint64_t trapped_since = 0;
+    int forced = 0;
+    if (ms < 0) {
+        const char *e = getenv("MC3_VOICE_STOP_MS");
+        ms = e ? atoi(e) : 1;
+    }
+    if (ms <= 0) {
+        sub_00391540_gen();
+        return;
+    }
+    if (MEM8(v + 0x12) & 1) {
+        while (MEM16(v + 0x12) & 0x8000) {
+            if (!forced && (MEM16(v + 0x12) & 0x8001) == 0x8001 && mcpx_apu_fe_trapped()) {
+                uint64_t now = voice_ms_now();
+                if (!trapped_since)
+                    trapped_since = now;
+                if (now - trapped_since >= (uint64_t)ms) {
+                    if (logged++ < 10)
+                        fprintf(stderr, "[DSOUND] voice %08X: stop waited %u ms on a trapped APU"
+                                " front end -- stopped as at DirectSound's timeout\n", v,
+                                (unsigned)(now - trapped_since));
+                    voice_call(sub_003907DA, v);
+                    forced = 1;
+                    continue;
+                }
+            } else {
+                trapped_since = 0;
+            }
+            voice_call(sub_003908C3, v);
+        }
+    }
+    g_ecx = v;
+    g_esp += 4;                            /* ret */
+}
+
 /* ── DirectSound's DSP command wait: its doorbell found at run time ──
  *
  * sub_0038DAA3 (DSOUND) hands the audio DSP a command block and waits for the
