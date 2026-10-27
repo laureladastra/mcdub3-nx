@@ -690,7 +690,7 @@ static const char *volatile s_gil_holder_label;
 static void gil_lock(void)
 {
     uint64_t me;
-    int eager = gil_eager(), prio = eager ? gil_prio_now() : 0, counted = 0, waited;
+    int eager = gil_eager(), prio = eager ? gil_prio_now() : 0, counted = 0, waited, ahead;
     DWORD blocker;
     const char *blocker_label;
     LARGE_INTEGER t0, t1, f;
@@ -698,6 +698,7 @@ static void gil_lock(void)
     EnterCriticalSection(&s_gil_cs);
     me = s_gil_next++;
     waited = me != s_gil_serving;
+    ahead = (int)(me - s_gil_serving);
     blocker = s_gil_holder_tid;
     blocker_label = s_gil_holder_label;
     if (me != s_gil_serving && eager) {
@@ -742,8 +743,18 @@ static void gil_lock(void)
         us = (int64_t)((t1.QuadPart - t0.QuadPart) * 1000000 / f.QuadPart);
         if (t_gil_main) {
             InterlockedExchangeAdd(&s_gil_main_wait_us, (LONG)us);
-            if (us > 50000)
+            if (us > 50000) {
+                /* A dropped frame's worth: who had the lock when the main
+                 * thread asked (with MC3_PERF; at most 20 lines a run). */
+                static int perf = -1, lines;
                 InterlockedIncrement(&s_gil_main_long);
+                if (perf < 0)
+                    perf = getenv("MC3_PERF") != NULL;
+                if (perf && lines++ < 20)
+                    fprintf(stderr, "[gil] main thread waited %lld ms for the guest lock: held by"
+                            " thread %u (%s), %d in line before it\n", (long long)(us / 1000),
+                            (unsigned)blocker, blocker_label ? blocker_label : "?", ahead - 1);
+            }
         }
         xbox_gil_stat_take((uint32_t)s_gil_holder_tid, s_gil_holder_label, t_gil_main,
                            waited, (uint32_t)blocker, blocker_label, us);
