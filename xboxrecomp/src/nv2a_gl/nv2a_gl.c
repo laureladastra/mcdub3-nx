@@ -164,6 +164,13 @@ static int s_pf_on = -1;
 static uint64_t s_pf_ns[PF_N], s_pf_t;
 static uint32_t s_pf_draws, s_pf_frames, s_pf_verts, s_pf_idx;
 static uint32_t s_pf_cdraws, s_pf_crows, s_pf_udraws;   /* constants / other uniforms changed */
+/* Draws that changed no GL state at all since the previous one -- same
+ * surface, program, textures and samplers, state, uniforms and constants,
+ * vertex layout and primitive: the ones a merge of consecutive draws could
+ * fold into their predecessor (s_draw_changed is set wherever a draw
+ * changes something). Measured before building that merge. */
+static int s_draw_changed;
+static uint32_t s_pf_same;
 static uint64_t hz_now(void)
 {
     struct timespec ts;
@@ -219,6 +226,7 @@ static void bind_tex(GLuint tex)
     int u = s_active_unit;
     if (u >= 0 && u < 4 && (s_bound_known & (1 << u)) && s_bound[u] == tex)
         return;
+    s_draw_changed = 1;
     glBindTexture(GL_TEXTURE_2D, tex);
     if (u >= 0 && u < 4) {
         s_bound[u] = tex;
@@ -2167,6 +2175,7 @@ static void bind_stage(const uint32_t *regs, int i, float scale[2])
             | ((uint32_t)(min == 0x2702) << 19) | 0x80000000u;
         TexParam *tp = &s_tex_param[tex % TEX_PARAM_SLOTS];
         if (tp->id != tex || tp->key != key) {
+            s_draw_changed = 1;
             tp->id = tex;
             tp->key = key;
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrap_mode(addr & 0xF));
@@ -3321,6 +3330,7 @@ static void apply_state(const uint32_t *r, int has_depth, const GlSurf *s)
     want.cm = cm;
     if (s_st_valid && !memcmp(&want, &s_st, sizeof want))
         return;
+    s_draw_changed = 1;
     s_st = want;
     s_st_valid = 1;
 
@@ -3756,6 +3766,7 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
     s_batch = b;
     depth_tex_prepare(r, b);
     pf_start();
+    s_draw_changed = 0;
     s = surf_bind(&b->surface, b->zeta_va);
     pf_mark(PF_SURF);
     if (!s)
@@ -3801,6 +3812,7 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
     if (p->prog != s_cur_prog) {
         glUseProgram(p->prog);
         s_cur_prog = p->prog;
+        s_draw_changed = 1;
     }
     pf_mark(PF_PROG);
 
@@ -3836,6 +3848,7 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
     if (p->u_c >= 0 && !(p->vpc_valid && p->vpc_gen == b->vp_const_gen)) {
         /* Same executor version: same contents, no compare needed. */
         s_pf_cdraws++;
+        s_draw_changed = 1;
         if (!p->vpc_valid || !p->vpc_rows) {
             memcpy(p->vpc, b->vp_consts, sizeof p->vpc);
             s_pf_crows += (uint32_t)p->n_c;
@@ -3881,6 +3894,7 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
         u.afunc = r[0x300 / 4] ? (GLint)r[0x33C / 4] : 0x207;
         if (!p->uni_valid || memcmp(&u, &p->uni, sizeof u) != 0) {
             s_pf_udraws++;
+            s_draw_changed = 1;
             p->uni = u;
             p->uni_valid = 1;
             if (p->u_surf >= 0) glUniform4fv(p->u_surf, 1, u.surf);
@@ -4167,6 +4181,7 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
          * came out as the fog colour -- grey squares. */
         static uint32_t last_mask = 0xFFFFFFFFu, last_gen;
         if (b->attr_present != last_mask || b->attr_const_gen != last_gen) {
+            s_draw_changed = 1;
             last_mask = b->attr_present;
             last_gen = b->attr_const_gen;
             for (a = 0; a < NV2A_RAW_ATTRS; a++)
@@ -4223,6 +4238,28 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
                     b->attr_present, b->xform, b->vp_start, pk.shader_program, pk.control,
                     r[0x1B00 / 4], (r[0x1B04 / 4] >> 8) & 0xFF);
         pf_mark(PF_VTX);
+        if (s_pf_on > 0) {
+            /* Same as the previous draw in everything but its vertices? */
+            static const GlSurf *last_s;
+            static GLuint last_ds;
+            static uint32_t last_frame = 0xFFFFFFFFu, last_sig[2 + 3 * NV2A_RAW_ATTRS];
+            static GLenum last_mode;
+            uint32_t sig[2 + 3 * NV2A_RAW_ATTRS];
+            memset(sig, 0, sizeof sig);
+            sig[0] = b->attr_present;
+            sig[1] = b->attr_direct;
+            for (a = 0; a < NV2A_RAW_ATTRS; a++)
+                if (b->attr_direct & (1u << a)) {
+                    sig[2 + 3 * a] = b->direct[a].type;
+                    sig[3 + 3 * a] = b->direct[a].size;
+                    sig[4 + 3 * a] = b->direct[a].stride;
+                }
+            if (!s_draw_changed && last_frame == s_frame && last_s == s && last_ds == s->ds_on
+                && last_mode == mode && !memcmp(sig, last_sig, sizeof sig))
+                s_pf_same++;
+            last_s = s; last_ds = s->ds_on; last_frame = s_frame; last_mode = mode;
+            memcpy(last_sig, sig, sizeof sig);
+        }
         glDrawElements(mode, (GLsizei)n, idx_type, (const void *)(uintptr_t)idx_at);
         pf_mark(PF_DRAW);
         if (s_pf_on > 0) {
@@ -5385,14 +5422,14 @@ void nv2a_gl_prof_stats(double secs, char *out, size_t n)
         return;
     }
     k = (size_t)snprintf(out, n, "%u frames, per frame: %u draws (%u verts, %u indices), "
-                         "%u with new constants (%u rows), %u new uniforms; ms:",
+                         "%u with new constants (%u rows), %u new uniforms, %u same as the one before; ms:",
                          s_pf_frames, s_pf_draws / fr, s_pf_verts / fr, s_pf_idx / fr,
-                         s_pf_cdraws / fr, s_pf_crows / fr, s_pf_udraws / fr);
+                         s_pf_cdraws / fr, s_pf_crows / fr, s_pf_udraws / fr, s_pf_same / fr);
     for (i = 0; i < PF_N && k < n; i++)
         k += (size_t)snprintf(out + k, n - k, " %s %.1f", s_pf_name[i], s_pf_ns[i] / 1e6 / fr);
     memset(s_pf_ns, 0, sizeof s_pf_ns);
     s_pf_draws = s_pf_frames = s_pf_verts = s_pf_idx = 0;
-    s_pf_cdraws = s_pf_crows = s_pf_udraws = 0;
+    s_pf_cdraws = s_pf_crows = s_pf_udraws = s_pf_same = 0;
 }
 
 void nv2a_gl_queue_stats(double secs, int *gl_idle_pct, int *exec_wait_pct)
