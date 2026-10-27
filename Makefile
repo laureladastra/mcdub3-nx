@@ -37,13 +37,13 @@ LOGS := $(WORK)/logs
 NOW   = $(shell date +%Y%m%d_%H%M%S)
 
 # Command-line settings that the scripts read from the environment.
-export VULKAN DEBUG GEN_DEBUGINFO JOBS SECS HEADLESS GDB LTO LTO_JOBS NO_GAME WINDOW VIDEO KEEP EVERY NATIVE KEYS TRACE \
+export VULKAN DEBUG GEN_DEBUGINFO JOBS SECS HEADLESS GDB NO_GAME WINDOW VIDEO KEEP EVERY NATIVE KEYS TRACE \
        MC3_WORK MC3_GAME_DIR MC3_MMIO_SECTIONS MC3_RECOMP_ARGS MC3_DISASM_ARGS FACTOR MIN FILES HD SCALE UI_SCALE SETTINGS GAME \
        RELEASE_DIR MC3_BUILD_ID EDITION WIN_ARCH DISC
 
 .PHONY: help setup nsp check-vm extract lift regen relift \
         xbe-edition build build-vk build-debug windows mac-app run run-gdb run-headless snapshot report hoststacks profile record difftest trap \
-        switch switch-vk switch-lto send \
+        switch switch-vk send \
         hd-dump hd-tools hd-upscale import-save save-sync-up save-sync-down \
         seeds lift-report log du clean-build clean-gen clean toolkit-test
 
@@ -184,9 +184,6 @@ nsp:  ## NSP forwarders (home-menu apps; locally only), one per edition, from co
 
 switch-vk:  ## Switch build with Vulkan (NVK)
 	$(MAKE) switch VULKAN=1
-
-switch-lto:  ## Switch build with link-time optimisation
-	$(MAKE) switch LTO=1
 
 send:  ## Send the NRO over nxlink (hbmenu, press Y) and log the game to work-<game>/logs/switch_*.log; SWITCH_IP=a.b.c.d, NATIVE=1
 	@mkdir -p $(LOGS)

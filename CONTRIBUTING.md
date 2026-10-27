@@ -556,7 +556,7 @@ Disk savers, already the default: the lifted C is built without debug info
 (backtraces and breakpoints still name every `sub_XXXXXXXX`;
 `GEN_DEBUGINFO=1 tools/build_linux.sh` turns it on when you need line-level
 stepping, at a few GB). Delete build trees you're not using
-(`rm -rf work-<game>/build-*-lto`); `du -sh work-<game>/*` shows where space went.
+(`rm -rf work-<game>/build-*`); `du -sh work-<game>/*` shows where space went.
 
 **If builds through the shared folder are slow:** `export MC3_WORK=<a folder
 on the VM disk>` moves only the generated files (lifted C, builds) off the

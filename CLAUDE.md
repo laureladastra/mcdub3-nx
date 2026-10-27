@@ -90,7 +90,9 @@ in nfsu2-sw's README (Configuration section); the toolkit is the same.
   win. Find MC3's movie format early.
 - **Performance levers:** register/x87 locals in the translator, spin-loop
   hints, native replacements for hot functions, shader/pipeline cache, LTO,
-  Vulkan (NVK).
+  Vulkan (NVK). For MC3 (2026-10-27): LTO gave nothing in rain races
+  (22.0 vs 22.9 fps; the GL thread is the limit), removed; Vulkan (NVK)
+  ran 14 fps with visual bugs, reverted.
 
 ## MC3 facts
 

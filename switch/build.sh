@@ -3,7 +3,7 @@
 #
 #   <SD>/switch/mcdub3-nx/mcdub3-nx-<edition>.nro   the edition of the lift
 #                                             (config/<game>/xbe_facts.h: usa, ...);
-#                                             -vulkan / -lto added for those
+#                                             -vulkan added for that
 #   (GAME=remix: <SD>/switch/mcdub3remix-nx/mcdub3remix-nx-<edition>.nro,
 #   mcdub3remix_env.txt, ...: config/remix/game.env)
 #   <SD>/switch/mcdub3-nx/game/               the extracted disc (never the ISO)
@@ -15,11 +15,10 @@
 #   DEVKITPRO      /opt/devkitpro (switch-dev, switch-sdl2, switch-mesa)
 #   MC3_GEN_DIR    lifted C from tools/regen.sh
 #   SD_ROOT        staging SD root (default $MC3_WORK/switch_sd)
-#   BUILD_DIR      default $MC3_WORK/build-switch[-vk][-lto]
+#   BUILD_DIR      default $MC3_WORK/build-switch[-vk]
 #   JOBS           parallel compile jobs (default: by free memory)
 #   VULKAN=1       Vulkan renderer against NVK_SDK / GLSLANG_DIR
 #                  (default $MC3_WORK/deps/{mesa-sdk/usr/local,glslang-switch})
-#   LTO=1          link-time optimisation (LTO_JOBS, ~2 GB each)
 #   NO_GAME=1      stage only the NRO (skip syncing the disc)
 #
 # Then: copy <SD>/switch/mcdub3-nx/ to the card, or `nxlink -s` the NRO, and start
@@ -49,10 +48,6 @@ if [ "${VULKAN:-0}" = "1" ]; then
     GLSLANG_DIR="${GLSLANG_DIR:-$MC3_WORK/deps/glslang-switch}"
     [ -d "$NVK_SDK" ] || mc3_fail "VULKAN=1 needs mesa-switch NVK in $NVK_SDK"
     ARGS=(-DMC3_VULKAN=ON -DNVK_SDK="$NVK_SDK" -Dglslang_DIR="$GLSLANG_DIR/lib/cmake/glslang")
-fi
-if [ "${LTO:-0}" = "1" ]; then
-    SUFFIX="$SUFFIX-lto"; NRO_NAME="$NRO_NAME-lto"
-    ARGS+=(-DMC3_LTO=ON -DMC3_LTO_JOBS="${LTO_JOBS:-4}")
 fi
 BUILD="${BUILD_DIR:-$MC3_WORK/build-switch$SUFFIX}"
 # A work/ shared between machines (the Linux VM sees the repo at

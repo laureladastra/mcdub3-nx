@@ -186,19 +186,6 @@ option(MC3_GEN_DEBUGINFO "Debug info (-g) for the lifted code" OFF)
 if(NOT MC3_GEN_DEBUGINFO)
     list(APPEND MC3_GEN_FLAGS "-g0")
 endif()
-
-# Link-time optimisation of the lifted code and the manual overrides, so lifted
-# callers inline each other (~1-2 GB of RAM per LTO job).
-option(MC3_LTO "Link-time optimisation of the lifted code" OFF)
-set(MC3_LTO_JOBS "4" CACHE STRING "Parallel LTO link jobs")
-if(MC3_LTO)
-    list(APPEND MC3_GEN_FLAGS "-flto=auto")
-    set_property(SOURCE ${MC3_MANUAL_C} APPEND PROPERTY
-        COMPILE_OPTIONS "-flto=auto;-fno-strict-aliasing;-fwrapv")
-    target_link_options(${PROJECT_NAME} PRIVATE
-        "-flto=${MC3_LTO_JOBS}" "-flto-partition=balanced" ${MC3_GEN_OPT})
-    target_compile_definitions(${PROJECT_NAME} PRIVATE MC3_LTO_BUILD=1)   # named in the log
-endif()
 set_source_files_properties(${MC3_GEN_SOURCES} PROPERTIES COMPILE_OPTIONS "${MC3_GEN_FLAGS}")
 target_link_libraries(${PROJECT_NAME} PRIVATE m)
 
