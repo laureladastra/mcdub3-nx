@@ -197,6 +197,7 @@ if(MC3_LTO)
         COMPILE_OPTIONS "-flto=auto;-fno-strict-aliasing;-fwrapv")
     target_link_options(${PROJECT_NAME} PRIVATE
         "-flto=${MC3_LTO_JOBS}" "-flto-partition=balanced" ${MC3_GEN_OPT})
+    target_compile_definitions(${PROJECT_NAME} PRIVATE MC3_LTO_BUILD=1)   # named in the log
 endif()
 set_source_files_properties(${MC3_GEN_SOURCES} PROPERTIES COMPILE_OPTIONS "${MC3_GEN_FLAGS}")
 target_link_libraries(${PROJECT_NAME} PRIVATE m)

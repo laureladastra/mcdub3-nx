@@ -684,8 +684,15 @@ static int game_main(void)
     setvbuf(stderr, NULL, _IONBF, 0);
 #endif
     printf("=== " MC3_GAME_TITLE " (Xbox) - static recompilation ===\n");
-    printf(MC3_SD_DIR " %s, %s package, lifted from the %s disc, %s\n", MC3_VERSION,
-           MC3_PACKAGE_EDITION, MC3_EDITION, MC3_BUILD_ID);
+    /* Which build wrote the log: the Switch's NROs share one log file
+     * (mcdub3_log.txt, the run before in mcdub3_log_prev.txt). */
+#if defined(MC3_LTO_BUILD)
+#define MC3_BUILD_KIND ", lto build"
+#else
+#define MC3_BUILD_KIND ""
+#endif
+    printf(MC3_SD_DIR " %s, %s package, lifted from the %s disc, %s%s\n", MC3_VERSION,
+           MC3_PACKAGE_EDITION, MC3_EDITION, MC3_BUILD_ID, MC3_BUILD_KIND);
     install_crash_reporter();
     set_runtime_defaults();
     log_settings();
