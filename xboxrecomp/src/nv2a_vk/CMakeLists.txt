@@ -23,9 +23,16 @@ if(NINTENDO_SWITCH)
     target_include_directories(xbox_nv2a_vk PUBLIC "${NVK_SDK}/include")
     target_sources(xbox_nv2a_vk PRIVATE switch_elf_stubs.c switch_egl_stubs.c)
     # Static NVK and what it needs; listed twice for archive rescanning.
+    # Newer Mesa (26, switch/devkitpro-nvk-image) compresses its disk cache
+    # with zstd: linked when the portlibs have it.
+    find_library(NVK_ZSTD zstd)
+    set(_nvk_extra "")
+    if(NVK_ZSTD)
+        set(_nvk_extra "${NVK_ZSTD}")
+    endif()
     target_link_libraries(xbox_nv2a_vk PUBLIC
-        "${NVK_SDK}/lib/libvulkan.a" expat z nx
-        "${NVK_SDK}/lib/libvulkan.a" expat z nx stdc++ m)
+        "${NVK_SDK}/lib/libvulkan.a" expat z ${_nvk_extra} nx
+        "${NVK_SDK}/lib/libvulkan.a" expat z ${_nvk_extra} nx stdc++ m)
 else()
     find_package(Vulkan REQUIRED)
     find_package(PkgConfig REQUIRED)
