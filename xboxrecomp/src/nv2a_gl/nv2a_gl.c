@@ -915,95 +915,11 @@ static void tex_set_levels(GlTex *t, uint32_t n)
 static uint64_t hz_now(void);
 #define HZ_GL(call) do { uint64_t hz_t0_ = hz_now(); call; s_hz_gl_ns += hz_now() - hz_t0_; } while (0)
 
-/* Deferred levels. A race starts with ~480 new textures in one frame
- * (Switch, 2026-10-27: a 465 ms frame, 238 ms of it uploading their mip
- * levels). Once a frame has spent RECOMP_GL_MIP_DEFER_MS (4) on textures,
- * new ones get level 0 only and their levels are queued; each flip uploads
- * queued levels for up to RECOMP_GL_MIP_DRAIN_MS (2) -- for textures checked
- * against guest memory this frame or the last, so the levels match level 0.
- * Until then they are sampled without mipmaps. RECOMP_GL_MIP_DEFER_MS=0:
- * never deferred. */
-enum { MIPQ_DXT, MIPQ_ARGB, MIPQ_GEN };
-typedef struct { GlTex *t; GLuint tex; uint32_t va, hash, size0, fill; GLenum fmt; int kind; } MipJob;
-static MipJob s_mipq[GL_MAX_TEX];
-static uint32_t s_mipq_n;
-static int s_mip_defer_ms = -1, s_mip_drain_ms = 2;
-static uint32_t s_mip_deferred;                     /* this frame, for [hitch] */
-static uint32_t s_mip_deferred_any;
-
-static int mip_defer(GlTex *t, int kind, GLenum fmt, uint32_t size0, uint32_t fill)
-{
-    uint32_t i;
-    if (s_mip_defer_ms < 0) {
-        const char *e = getenv("RECOMP_GL_MIP_DEFER_MS");
-        const char *d = getenv("RECOMP_GL_MIP_DRAIN_MS");
-        s_mip_defer_ms = e ? atoi(e) : 4;
-        if (d && atoi(d) > 0)
-            s_mip_drain_ms = atoi(d);
-    }
-    if (s_mip_defer_ms <= 0 || !mips_wanted(t)
-        || s_hz_tex_ns < (uint64_t)s_mip_defer_ms * 1000000u)
-        return 0;
-    for (i = 0; i < s_mipq_n && s_mipq[i].t != t; i++) { }
-    if (i == s_mipq_n) {
-        if (s_mipq_n == GL_MAX_TEX)
-            return 0;
-        s_mipq_n++;
-    }
-    s_mipq[i].t = t; s_mipq[i].tex = t->tex; s_mipq[i].va = t->va; s_mipq[i].hash = t->hash;
-    s_mipq[i].size0 = size0; s_mipq[i].fill = fill; s_mipq[i].fmt = fmt; s_mipq[i].kind = kind;
-    if (!s_mip_deferred_any++)
-        fprintf(stderr, "  [GL] frame %u: %.1f ms of textures -- mip levels deferred to the"
-                " next flips (RECOMP_GL_MIP_DEFER_MS=%d)\n", s_frame, s_hz_tex_ns / 1e6,
-                s_mip_defer_ms);
-    s_mip_deferred++;
-    tex_set_levels(t, 1);
-    return 1;
-}
-
 static void tex_mips_dxt_(GlTex *t, GLenum fmt, uint32_t size0);
-static void tex_mips_argb_(GlTex *t, const uint32_t *src, uint32_t fill);
-static void tex_mips_generate_(GlTex *t);
-static void bind_tex(GLuint tex);
-
-/* At a flip: queued levels, oldest first, for up to the drain budget. */
-static void mip_drain(void)
-{
-    uint64_t t0, end;
-    uint32_t i = 0;
-    if (!s_mipq_n)
-        return;
-    t0 = hz_now();
-    end = t0 + (uint64_t)s_mip_drain_ms * 1000000u;
-    while (i < s_mipq_n && hz_now() < end) {
-        MipJob *j = &s_mipq[i];
-        GlTex *t = j->t;
-        if (t->tex != j->tex || t->va != j->va || t->hash != j->hash) {
-            *j = s_mipq[--s_mipq_n];                /* replaced or rewritten: drop */
-            continue;
-        }
-        if (t->checked + 1 < s_frame) {             /* not verified lately: later */
-            i++;
-            continue;
-        }
-        bind_tex(t->tex);
-        if (j->kind == MIPQ_DXT)
-            tex_mips_dxt_(t, j->fmt, j->size0);
-        else if (j->kind == MIPQ_ARGB)
-            tex_mips_argb_(t, (const uint32_t *)((const uint8_t *)xbox_GetMemoryOffset() + t->va),
-                           j->fill);
-        else
-            tex_mips_generate_(t);
-        *j = s_mipq[--s_mipq_n];
-    }
-    s_hz_mip_ns += hz_now() - t0;
-}
-
 static void tex_mips_dxt(GlTex *t, GLenum fmt, uint32_t size0)
 {
     uint64_t t0 = hz_now();
-    if (!mip_defer(t, MIPQ_DXT, fmt, size0, 0))
-        tex_mips_dxt_(t, fmt, size0);
+    tex_mips_dxt_(t, fmt, size0);
     s_hz_mip_ns += hz_now() - t0;
 }
 static void tex_mips_dxt_(GlTex *t, GLenum fmt, uint32_t size0)
@@ -1026,11 +942,11 @@ static void tex_mips_dxt_(GlTex *t, GLenum fmt, uint32_t size0)
     tex_set_levels(t, n);
 }
 
+static void tex_mips_argb_(GlTex *t, const uint32_t *src, uint32_t fill);
 static void tex_mips_argb(GlTex *t, const uint32_t *src, uint32_t fill)
 {
     uint64_t t0 = hz_now();
-    if (!mip_defer(t, MIPQ_ARGB, 0, 0, fill))
-        tex_mips_argb_(t, src, fill);
+    tex_mips_argb_(t, src, fill);
     s_hz_mip_ns += hz_now() - t0;
 }
 static void tex_mips_argb_(GlTex *t, const uint32_t *src, uint32_t fill)
@@ -1058,11 +974,11 @@ static void tex_mips_argb_(GlTex *t, const uint32_t *src, uint32_t fill)
     tex_set_levels(t, n);
 }
 
+static void tex_mips_generate_(GlTex *t);
 static void tex_mips_generate(GlTex *t)
 {
     uint64_t t0 = hz_now();
-    if (!mip_defer(t, MIPQ_GEN, 0, 0, 0))
-        tex_mips_generate_(t);
+    tex_mips_generate_(t);
     s_hz_mip_ns += hz_now() - t0;
 }
 static void tex_mips_generate_(GlTex *t)
@@ -5412,20 +5328,18 @@ static void gl_flip(void)
                     if (s_hz_fmt[c] && k < sizeof fm - 12)
                         k += (size_t)snprintf(fm + k, sizeof fm - k, " %02X:%u", c, s_hz_fmt[c]);
                 fprintf(stderr, "[hitch] frame %u: %.0f ms -- %u programs compiled (%.0f ms),"
-                        " %u textures %.1f MB (%.0f ms: GL %.0f, mips %.0f, %u deferred), %u draws%s%s\n",
+                        " %u textures %.1f MB (%.0f ms: GL %.0f, mips %.0f), %u draws%s%s\n",
                         s_frame, dt / 1e6, s_hz_progs, s_hz_prog_ns / 1e6, s_hz_texs,
                         s_hz_tex_bytes / 1048576.0, s_hz_tex_ns / 1e6, s_hz_gl_ns / 1e6,
-                        s_hz_mip_ns / 1e6, s_mip_deferred, s_hz_draws, fm[0] ? "; formats" : "", fm);
+                        s_hz_mip_ns / 1e6, s_hz_draws, fm[0] ? "; formats" : "", fm);
             }
         }
         last_ns = now;
         s_hz_progs = s_hz_texs = s_hz_draws = 0;
         s_hz_prog_ns = s_hz_tex_ns = s_hz_tex_bytes = 0;
         s_hz_gl_ns = s_hz_mip_ns = 0;
-        s_mip_deferred = 0;
         memset(s_hz_fmt, 0, sizeof s_hz_fmt);
     }
-    mip_drain();                                   /* levels deferred in a burst */
     if (s_pw_go && s_pw_file)
         prog_cache_prewarm_step(s_pw_per_frame);   /* the deferred list, a little a frame */
     ct_drain();                                    /* what the compile thread finished */
