@@ -51,9 +51,10 @@
 # Mipmaps: smoother textures in the distance, less shimmering.
 #RECOMP_GL_MIPS=1
 
-# Anisotropic filtering: sharp textures at shallow angles (roads).
-# 1 = off, up to 16.
-#RECOMP_GL_ANISO=16
+# Anisotropic filtering: sharp textures at shallow angles (roads far ahead).
+# 1 = off, up to 16. The Switch's default is 4: 16 costs its GPU much more
+# for detail its screen hardly shows (Mac, Linux, Windows: 16).
+#RECOMP_GL_ANISO=4
 
 # Texture detail bias: negative = sharper, positive = softer.
 #RECOMP_GL_LOD_BIAS=-0.25
