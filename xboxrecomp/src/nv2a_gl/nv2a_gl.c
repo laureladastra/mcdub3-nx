@@ -34,6 +34,7 @@
  *                                    per zeta address (the old behaviour)
  */
 #include "nv2a_gl.h"
+#include <ctype.h>
 #include <sys/stat.h>
 #ifdef _WIN32
 #include <direct.h>
@@ -172,6 +173,11 @@ static uint32_t s_pf_cdraws, s_pf_crows, s_pf_udraws;   /* constants / other uni
  * changes something). Measured before building that merge. */
 static int s_draw_changed;
 static uint32_t s_pf_same, s_pf_folded, s_pf_calls;
+/* What s_draw_changed says changed (bits), and which uniforms (UF_*): the
+ * census of draws that would have folded but for that (merge_census). */
+enum { DC_PROG = 1, DC_TEX = 2, DC_SAMP = 4, DC_STATE = 8, DC_CONST = 16, DC_UNI = 32,
+       DC_ATTR = 64 };
+static uint32_t s_draw_uf;
 /* Which uniform changed, for the draws that re-send them (by field). */
 enum { UF_SURF, UF_AA, UF_M, UF_VPOFF, UF_TSCALE, UF_C0, UF_C1, UF_FOG, UF_FC, UF_AREF,
        UF_MV, UF_FOGPLANE, UF_FOG01, UF_SNAPY, UF_XFORM, UF_AFUNC, UF_N };
@@ -233,7 +239,7 @@ static void bind_tex(GLuint tex)
     int u = s_active_unit;
     if (u >= 0 && u < 4 && (s_bound_known & (1 << u)) && s_bound[u] == tex)
         return;
-    s_draw_changed = 1;
+    s_draw_changed |= DC_TEX;
     glBindTexture(GL_TEXTURE_2D, tex);
     if (u >= 0 && u < 4) {
         s_bound[u] = tex;
@@ -2189,7 +2195,7 @@ static void bind_stage(const uint32_t *regs, int i, float scale[2])
             | ((uint32_t)(min == 0x2702) << 19) | 0x80000000u;
         TexParam *tp = &s_tex_param[tex % TEX_PARAM_SLOTS];
         if (tp->id != tex || tp->key != key) {
-            s_draw_changed = 1;
+            s_draw_changed |= DC_SAMP;
             tp->id = tex;
             tp->key = key;
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrap_mode(addr & 0xF));
@@ -3344,7 +3350,7 @@ static void apply_state(const uint32_t *r, int has_depth, const GlSurf *s)
     want.cm = cm;
     if (s_st_valid && !memcmp(&want, &s_st, sizeof want))
         return;
-    s_draw_changed = 1;
+    s_draw_changed |= DC_STATE;
     s_st = want;
     s_st_valid = 1;
 
@@ -3634,15 +3640,33 @@ static int ring_alloc_exact(GlRing *g, GLintptr at, GLsizeiptr size, void **ptr)
  * its indices shifted to them -- and the batch goes to GL as one call when
  * anything changes (every state-changing GL call flushes first,
  * gl_merge.h), at a clear, blit or flip, or when the queue runs dry.
- * Only what folds without conversion: triangle lists (quads are
- * triangulated already) whose attributes are interleaved in one range with
- * one stride, none converted on the CPU. */
+ * Triangle lists (quads are triangulated already; strips and fans are
+ * converted below). Attributes interleaved in one range with one stride
+ * grow in place in the ring; those from several buffers or converted on the
+ * CPU are held in staging (GlStageLayout). RECOMP_GL_MERGE=2: the first
+ * kind only. Why draws did not fold: the census in the perf report
+ * ("GL no fold"; flythrough 2026-10-27: textures, then matrices). */
 typedef struct {
     const uint8_t *lo;
     GLsizeiptr bytes;
     uint32_t stride;
     uint32_t sig[2 + 3 * NV2A_RAW_ATTRS];
 } GlMergeLayout;
+/* A draw whose attributes come from several buffers, or are converted on
+ * the CPU (b->attrs, packed float4), cannot grow in place in the ring: its
+ * streams lie back to back there. Such draws are held in CPU staging
+ * instead, one area per stream (each vertex buffer, and the packed one), and
+ * the batch goes up as one allocation when it is flushed (merge_flush).
+ * Compared whole (memcmp): two draws fold when it is the same. */
+#define MG_STREAMS (NV2A_RAW_ATTRS + 1)
+typedef struct {
+    uint32_t present, direct, nst, np;
+    uint32_t stride[MG_STREAMS];
+    int32_t  st_of[NV2A_RAW_ATTRS];         /* stream of each present attribute */
+    uint32_t off[NV2A_RAW_ATTRS];           /* its byte offset in that stream's vertex */
+    uint32_t type[NV2A_RAW_ATTRS], size[NV2A_RAW_ATTRS];
+    uint8_t  slot[NV2A_RAW_ATTRS];          /* converted attributes, in packed order */
+} GlStageLayout;
 static struct {
     const GlSurf *s;
     GLuint ds;
@@ -3652,8 +3676,41 @@ static struct {
     uint32_t *idx;
     size_t n, cap;
     uint32_t maxv;
+    int staged;                             /* held in s_stg (GlStageLayout) */
+    GlStageLayout slay;
 } s_mg;
+static struct { uint8_t *p; size_t len, cap; } s_stg[MG_STREAMS];
+#define MG_STAGE_MAX (3u << 20)             /* below a ring quarter (ring_alloc) */
 static int s_merge_on = -1;
+
+/* Why the draws that did not fold did not (MC3_PERF): not mergeable (layout
+ * or primitive), nothing held / another surface or layout, or -- the held
+ * draw matching -- by what changed: s_draw_changed's bits and the uniforms,
+ * counted per combination (the top ones go to the perf report). */
+#define CENSUS_N 64
+static struct { uint32_t key, n; } s_census[CENSUS_N];
+static uint32_t s_census_nolay, s_census_nohold, s_census_other;
+static int s_mg_was_active;             /* a draw was held when this one began */
+/* Why merge_layout refused (MERGE_NO_*), and how often. */
+enum { MNO_PRIM, MNO_CONV, MNO_RUNS, MNO_STRIDE, MNO_N };
+static const char *const s_mno_name[MNO_N] = { "primitive", "converted attrs", "several buffers",
+                                               "strides" };
+static uint32_t s_mno[MNO_N];
+static int s_mno_last;
+static void merge_census(int ml, int held_match)
+{
+    uint32_t key, i;
+    if (!ml) { s_census_nolay++; s_mno[s_mno_last]++; return; }
+    if (!held_match) { s_census_nohold++; return; }
+    if (!s_draw_changed)
+        return;                                     /* folds (or ran out of ring) */
+    key = (uint32_t)s_draw_changed | (s_draw_uf << 8);
+    for (i = 0; i < CENSUS_N; i++) {
+        if (s_census[i].key == key && s_census[i].n) { s_census[i].n++; return; }
+        if (!s_census[i].n) { s_census[i].key = key; s_census[i].n = 1; return; }
+    }
+    s_census_other++;
+}
 
 /* A byte range of vertex data (vertex_runs, below). */
 typedef struct { const uint8_t *lo, *hi; GLintptr at; } VRun;
@@ -3664,10 +3721,13 @@ static int merge_layout(const Nv2aRawBatch *b, GlMergeLayout *L)
     VRun run[NV2A_RAW_ATTRS];
     int of_run[NV2A_RAW_ATTRS];
     uint32_t a, stride = 0;
+    s_mno_last = MNO_CONV;
     if (!b->vertex_count || (b->attr_present & ~b->attr_direct))
         return 0;                                   /* converted attributes */
+    s_mno_last = MNO_RUNS;
     if (vertex_runs(b, run, of_run) != 1)
         return 0;
+    s_mno_last = MNO_STRIDE;
     memset(L->sig, 0, sizeof L->sig);
     L->sig[0] = b->attr_present;
     L->sig[1] = b->attr_direct;
@@ -3732,6 +3792,152 @@ static int merge_append(const Nv2aRawBatch *b, const uint32_t *idx, uint32_t n,
     return 1;
 }
 
+/* The staged layout of `b` (GlStageLayout), its vertex buffers' byte ranges
+ * in run[]: 0 if it has none (a stride of 0 or above 512, two strides in one
+ * buffer, no attributes). */
+static int stage_layout(const Nv2aRawBatch *b, GlStageLayout *L, VRun *run)
+{
+    int of_run[NV2A_RAW_ATTRS];
+    uint32_t nrun, a;
+    if (!b->vertex_count || !b->attr_present)
+        return 0;
+    if ((b->attr_present & ~b->attr_direct) && !b->attrs)
+        return 0;
+    memset(L, 0, sizeof *L);
+    L->present = b->attr_present;
+    L->direct = b->attr_direct;
+    nrun = vertex_runs(b, run, of_run);
+    for (a = 0; a < NV2A_RAW_ATTRS; a++) {
+        L->st_of[a] = -1;
+        if (!(b->attr_direct & (1u << a)))
+            continue;
+        if (!b->direct[a].stride || b->direct[a].stride > 512)
+            return 0;
+        if (L->stride[of_run[a]] && L->stride[of_run[a]] != b->direct[a].stride)
+            return 0;
+        L->stride[of_run[a]] = b->direct[a].stride;
+        L->st_of[a] = of_run[a];
+        L->off[a] = (uint32_t)(b->direct[a].ptr - run[of_run[a]].lo);
+        L->type[a] = b->direct[a].type;
+        L->size[a] = b->direct[a].size;
+    }
+    for (a = 0; a < NV2A_RAW_ATTRS; a++)
+        if ((b->attr_present & ~b->attr_direct) & (1u << a)) {
+            L->st_of[a] = (int32_t)nrun;
+            L->off[a] = L->np * 16;
+            L->slot[L->np++] = (uint8_t)a;
+        }
+    L->nst = nrun + (L->np ? 1 : 0);
+    if (L->np)
+        L->stride[nrun] = L->np * 16;
+    return L->nst > 0;
+}
+
+/* Append b's vertices to the staged streams, its indices shifted to them:
+ * every stream's vertex k at k x its stride, k the first index past what
+ * each holds. 0 if it would not fit (then nothing changed). */
+static int stage_append(const Nv2aRawBatch *b, const GlStageLayout *L, const VRun *run,
+                        const uint32_t *idx, uint32_t n)
+{
+    uint32_t st, nv = b->vertex_count, nrun = L->nst - (L->np ? 1 : 0), v, i;
+    uint64_t k = 0, total = 0;
+    for (st = 0; st < L->nst; st++) {
+        uint64_t c = (s_stg[st].len + L->stride[st] - 1) / L->stride[st];
+        if (c > k) k = c;
+    }
+    if (k + nv > 0x7FFFFFFFu)
+        return 0;
+    for (st = 0; st < L->nst; st++) {
+        uint64_t need = st < nrun ? k * L->stride[st] + (uint64_t)(run[st].hi - run[st].lo)
+                                  : (k + nv) * L->stride[st];
+        total += (need + 63) & ~(uint64_t)63;
+    }
+    if (total > MG_STAGE_MAX)
+        return 0;
+    for (st = 0; st < L->nst; st++) {
+        size_t at = (size_t)k * L->stride[st];
+        size_t bytes = st < nrun ? (size_t)(run[st].hi - run[st].lo) : (size_t)nv * L->stride[st];
+        if (at + bytes > s_stg[st].cap) {
+            size_t cap = (at + bytes) * 2 + 65536;
+            uint8_t *p = (uint8_t *)realloc(s_stg[st].p, cap);
+            if (!p)
+                return 0;
+            s_stg[st].p = p;
+            s_stg[st].cap = cap;
+        }
+        if (st < nrun) {
+            memcpy(s_stg[st].p + at, run[st].lo, bytes);
+        } else {
+            float *out = (float *)(s_stg[st].p + at);
+            for (v = 0; v < nv; v++)
+                for (i = 0; i < L->np; i++)
+                    memcpy(out + ((size_t)v * L->np + i) * 4,
+                           b->attrs + ((size_t)v * NV2A_RAW_ATTRS + L->slot[i]) * 4,
+                           4 * sizeof(float));
+        }
+        s_stg[st].len = at + bytes;
+    }
+    if (!merge_add_indices(idx, n, (uint32_t)k))
+        return 0;                   /* (vertices staged: harmless, unused) */
+    if (k + nv > s_mg.maxv)
+        s_mg.maxv = (uint32_t)(k + nv);
+    return 1;
+}
+
+/* The staged streams into the ring, and the attributes pointed at them. */
+static void stage_upload(void)
+{
+    const GlStageLayout *L = &s_mg.slay;
+    GLintptr at, so[MG_STREAMS];
+    GLsizeiptr bytes = 0;
+    uint32_t st, a;
+    void *map;
+    uint8_t *dst;
+    static uint8_t *flat;
+    static size_t flat_cap;
+    for (st = 0; st < L->nst; st++) {
+        so[st] = bytes;
+        bytes += ((GLsizeiptr)s_stg[st].len + 63) & ~(GLsizeiptr)63;
+    }
+    at = ring_alloc(&s_vring, bytes, &map);
+    dst = (uint8_t *)map;
+    if (!dst) {
+        if ((size_t)bytes > flat_cap) {
+            free(flat);
+            flat_cap = (size_t)bytes + 65536;
+            flat = (uint8_t *)malloc(flat_cap);
+            if (!flat) { flat_cap = 0; return; }
+        }
+        dst = flat;
+    }
+    for (st = 0; st < L->nst; st++)
+        memcpy(dst + so[st], s_stg[st].p, s_stg[st].len);
+    ring_done(&s_vring, at, bytes, map, flat);
+    for (a = 0; a < NV2A_RAW_ATTRS; a++) {
+        GLint size;
+        GLenum type;
+        GLboolean norm;
+        int32_t sn = L->st_of[a];
+        if (sn < 0)
+            continue;
+        if (!(L->direct & (1u << a))) {
+            p_glVertexAttribPointer(a, 4, GL_FLOAT, GL_FALSE, (GLsizei)L->stride[sn],
+                                    (const void *)(uintptr_t)(at + so[sn] + L->off[a]));
+            continue;
+        }
+        size = (GLint)L->size[a];
+        switch (L->type[a]) {
+        case 0:  size = GL_BGRA; type = GL_UNSIGNED_BYTE; norm = GL_TRUE; break;
+        case 1:  type = GL_SHORT; norm = GL_TRUE; break;
+        case 2:  type = GL_FLOAT; norm = GL_FALSE; break;
+        case 4:  type = GL_UNSIGNED_BYTE; norm = GL_TRUE; break;
+        default: type = GL_SHORT; norm = GL_FALSE; break;
+        }
+        p_glVertexAttribPointer(a, size, type, norm, (GLsizei)L->stride[sn],
+                                (const void *)(uintptr_t)(at + so[sn] + L->off[a]));
+    }
+}
+
 /* Issue the held draw. Called by every state-changing GL call (gl_merge.h)
  * while one is held; its time goes to the "draw" phase of the profile. */
 static void merge_flush(void)
@@ -3744,6 +3950,8 @@ static void merge_flush(void)
         return;
     s_mg_active = 0;
     t0 = hz_now();
+    if (s_mg.staged)
+        stage_upload();
     if (s_mg.maxv <= 65536) {
         uint16_t *o;
         static uint16_t *tmp;
@@ -3960,6 +4168,8 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
     depth_tex_prepare(r, b);
     pf_start();
     s_draw_changed = 0;
+    s_draw_uf = 0;
+    s_mg_was_active = s_mg_active;
     s = surf_bind(&b->surface, b->zeta_va);
     pf_mark(PF_SURF);
     if (!s)
@@ -4005,7 +4215,7 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
     if (p->prog != s_cur_prog) {
         glUseProgram(p->prog);
         s_cur_prog = p->prog;
-        s_draw_changed = 1;
+        s_draw_changed |= DC_PROG;
     }
     pf_mark(PF_PROG);
 
@@ -4041,7 +4251,7 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
     if (p->u_c >= 0 && !(p->vpc_valid && p->vpc_gen == b->vp_const_gen)) {
         /* Same executor version: same contents, no compare needed. */
         s_pf_cdraws++;
-        s_draw_changed = 1;
+        s_draw_changed |= DC_CONST;
         if (!p->vpc_valid || !p->vpc_rows) {
             memcpy(p->vpc, b->vp_consts, sizeof p->vpc);
             s_pf_crows += (uint32_t)p->n_c;
@@ -4087,9 +4297,9 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
         u.afunc = r[0x300 / 4] ? (GLint)r[0x33C / 4] : 0x207;
         if (!p->uni_valid || memcmp(&u, &p->uni, sizeof u) != 0) {
             s_pf_udraws++;
-            s_draw_changed = 1;
+            s_draw_changed |= DC_UNI;
             if (s_pf_on > 0 && p->uni_valid) {
-#define UF(f, id) if (memcmp(&u.f, &p->uni.f, sizeof u.f)) s_pf_uf[id]++
+#define UF(f, id) if (memcmp(&u.f, &p->uni.f, sizeof u.f)) { s_pf_uf[id]++; s_draw_uf |= 1u << id; }
                 UF(surf, UF_SURF); UF(aa, UF_AA); UF(m, UF_M); UF(vpoff, UF_VPOFF);
                 UF(tscale, UF_TSCALE); UF(c0, UF_C0); UF(c1, UF_C1); UF(fog, UF_FOG);
                 UF(fc, UF_FC); UF(aref, UF_AREF); UF(mv, UF_MV); UF(fogplane, UF_FOGPLANE);
@@ -4381,7 +4591,7 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
          * came out as the fog colour -- grey squares. */
         static uint32_t last_mask = 0xFFFFFFFFu, last_gen;
         if (b->attr_present != last_mask || b->attr_const_gen != last_gen) {
-            s_draw_changed = 1;
+            s_draw_changed |= DC_ATTR;
             last_mask = b->attr_present;
             last_gen = b->attr_const_gen;
             for (a = 0; a < NV2A_RAW_ATTRS; a++)
@@ -4396,7 +4606,9 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
     {
         /* Fold into the held draw, or hold this one (see merge_flush). */
         GlMergeLayout L;
-        int ml;
+        GlStageLayout SL;
+        VRun srun[NV2A_RAW_ATTRS];
+        int ml, sl;
         /* MC3 draws mostly triangle strips (and some fans): converted to
          * lists for merging only -- strip triangle i is (i, i+1, i+2), every
          * other one with its first two swapped so it keeps its winding (and
@@ -4432,13 +4644,36 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
         }
         if (s_merge_on < 0) {
             const char *e = getenv("RECOMP_GL_MERGE");
-            s_merge_on = !(e && *e == '0');
+            s_merge_on = e && *e == '0' ? 0 : e && *e == '2' ? 2 : 1;
             fprintf(stderr, "  [GL] merging consecutive draws %s (RECOMP_GL_MERGE)\n",
-                    s_merge_on ? "on" : "off");
+                    s_merge_on == 2 ? "on, interleaved vertices only" : s_merge_on ? "on" : "off");
         }
+        s_mno_last = MNO_PRIM;
         ml = s_merge_on && mmode == GL_TRIANGLES && !s_watch_hit && s_finish <= 0
              && merge_layout(b, &L);
-        if (ml && s_mg_active && !s_draw_changed && s_mg.s == s && s_mg.ds == s->ds_on
+        sl = !ml && s_merge_on && s_merge_on != 2 && mmode == GL_TRIANGLES && !s_watch_hit
+             && s_finish <= 0 && (s_mno_last == MNO_RUNS || s_mno_last == MNO_CONV)
+             && stage_layout(b, &SL, srun);
+        if (s_pf_on > 0)
+            merge_census(ml || sl, s_mg_was_active && s_mg.s == s && s_mg.ds == s->ds_on
+                             && s_mg.mode == mmode
+                             && (sl ? s_mg.staged && !memcmp(&SL, &s_mg.slay, sizeof SL)
+                                    : !s_mg.staged && L.stride == s_mg.lay.stride
+                                      && !memcmp(L.sig, s_mg.lay.sig, sizeof L.sig)));
+        if (sl && s_mg_active && s_mg.staged && !s_draw_changed && s_mg.s == s
+            && s_mg.ds == s->ds_on && s_mg.mode == mmode && !memcmp(&SL, &s_mg.slay, sizeof SL)
+            && stage_append(b, &SL, srun, midx, mn)) {
+            s_pf_folded++;
+            pf_mark(PF_VTX);
+            if (s_pf_on > 0) {
+                s_pf_draws++;
+                s_pf_same++;
+                s_pf_verts += b->vertex_count;
+                s_pf_idx += n;
+            }
+            return;
+        }
+        if (ml && s_mg_active && !s_mg.staged && !s_draw_changed && s_mg.s == s && s_mg.ds == s->ds_on
             && s_mg.mode == mmode && L.stride == s_mg.lay.stride
             && !memcmp(L.sig, s_mg.lay.sig, sizeof L.sig)
             && merge_append(b, midx, mn, &L)) {
@@ -4452,9 +4687,35 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
             return;
         }
         merge_flush();
+        if (sl) {
+            uint32_t st;
+            s_mg.s = s;
+            s_mg.ds = s->ds_on;
+            s_mg.mode = mmode;
+            s_mg.staged = 1;
+            s_mg.slay = SL;
+            s_mg.n = 0;
+            s_mg.maxv = 0;
+            for (st = 0; st < SL.nst; st++)
+                s_stg[st].len = 0;
+            for (a = 0; a < NV2A_RAW_ATTRS; a++)
+                attr_enable(a, (b->attr_present >> a) & 1);
+            if (stage_append(b, &SL, srun, midx, mn)) {
+                s_mg_active = 1;
+                pf_mark(PF_VTX);
+                if (s_pf_on > 0) {
+                    s_pf_draws++;
+                    s_pf_verts += b->vertex_count;
+                    s_pf_idx += n;
+                }
+                return;
+            }
+            /* too big to stage: drawn as it came */
+        }
         if (!upload_vertices(b))
             return;
         if (ml) {
+            s_mg.staged = 0;
             s_mg.s = s;
             s_mg.ds = s->ds_on;
             s_mg.mode = mmode;
@@ -5707,6 +5968,51 @@ void nv2a_gl_prof_stats(double secs, char *out, size_t n)
             if (top[j] >= 0 && s_pf_uf[top[j]])
                 k += (size_t)snprintf(out + k, n - k, " %s %u", s_uf_name[top[j]], s_pf_uf[top[j]] / fr);
         memset(s_pf_uf, 0, sizeof s_pf_uf);
+    }
+    {   /* merge census: its own line on stderr (the report line is full) */
+        static const char *const dcn[7] = { "prog", "tex", "sampler", "state", "consts",
+                                            "uni", "attr" };
+        char line[640];
+        size_t q = 0;
+        int j, best;
+        q += (size_t)snprintf(line + q, sizeof line - q,
+                              "[perf] GL no fold, per frame: %u not mergeable (",
+                              s_census_nolay / fr);
+        for (j = 0; j < MNO_N; j++)
+            q += (size_t)snprintf(line + q, sizeof line - q, "%s%s %u", j ? ", " : "",
+                                  s_mno_name[j], s_mno[j] / fr);
+        memset(s_mno, 0, sizeof s_mno);
+        q += (size_t)snprintf(line + q, sizeof line - q,
+                              "), %u nothing held or another surface/layout;"
+                              " held draw matched but changed:", s_census_nohold / fr);
+        for (j = 0; j < 8 && q < sizeof line - 80; j++) {
+            uint32_t b2, key;
+            best = -1;
+            for (i = 0; i < CENSUS_N; i++)
+                if (s_census[i].n && (best < 0 || s_census[i].n > s_census[best].n))
+                    best = i;
+            if (best < 0 || s_census[best].n / fr == 0)
+                break;
+            key = s_census[best].key;
+            q += (size_t)snprintf(line + q, sizeof line - q, " %u", s_census[best].n / fr);
+            for (b2 = 0; b2 < 7; b2++)
+                if (key & (1u << b2))
+                    q += (size_t)snprintf(line + q, sizeof line - q, "%s%s",
+                                          line[q - 1] == ' ' || isdigit((unsigned char)line[q - 1]) ? " " : "+", dcn[b2]);
+            if (key >> 8) {
+                q += (size_t)snprintf(line + q, sizeof line - q, "(");
+                for (b2 = 0; b2 < UF_N; b2++)
+                    if ((key >> 8) & (1u << b2))
+                        q += (size_t)snprintf(line + q, sizeof line - q, "%s%s",
+                                              line[q - 1] == '(' ? "" : ",", s_uf_name[b2]);
+                q += (size_t)snprintf(line + q, sizeof line - q, ")");
+            }
+            q += (size_t)snprintf(line + q, sizeof line - q, ";");
+            s_census[best].n = 0;
+        }
+        fprintf(stderr, "%s rest %u\n", line, s_census_other / fr);
+        memset(s_census, 0, sizeof s_census);
+        s_census_nolay = s_census_nohold = s_census_other = 0;
     }
     memset(s_pf_ns, 0, sizeof s_pf_ns);
     s_pf_draws = s_pf_frames = s_pf_verts = s_pf_idx = 0;
