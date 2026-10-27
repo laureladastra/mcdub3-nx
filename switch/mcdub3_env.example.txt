@@ -42,6 +42,10 @@
 # (default: keep the aspect ratio).
 #RECOMP_GL_ASPECT=
 
+# Video clips with the Capture button (hold it: the last 30 s). Takes 96 MB
+# of memory for the recording; 0 = no clips (a hold then saves ~1 s).
+#MC3_RECORDING=1
+
 # Anti-aliasing of edges (FXAA), applied to the final picture.
 #RECOMP_GL_FXAA=1
 

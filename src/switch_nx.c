@@ -342,6 +342,27 @@ void switch_boot(void)
     env_file_apply();
     /* Keep the console awake through long loads and movies. */
     appletSetMediaPlaybackState(true);
+    /* Video capture (the Capture button's 30 s clips): with VideoCapture
+     * "Enabled" in the host's NACP (our forwarders', switch/nsp.sh) the
+     * application must hand the system its recording buffer, 96 MB, or a
+     * clip comes out a second long (2026-10-27). Title takeover only;
+     * MC3_RECORDING=0 keeps the memory. */
+    {
+        const char *e = getenv("MC3_RECORDING");
+        bool ok = false;
+        Result rc;
+        if (appletGetAppletType() != AppletType_Application || (e && e[0] == '0')) {
+            printf("[switch] video capture: not set up (%s)\n",
+                   e && e[0] == '0' ? "MC3_RECORDING=0" : "applet mode");
+        } else if (R_FAILED(rc = appletIsGamePlayRecordingSupported(&ok)) || !ok) {
+            printf("[switch] video capture: not supported by the host title (0x%X)\n", rc);
+        } else if (R_FAILED(rc = appletInitializeGamePlayRecording())
+                   || R_FAILED(rc = appletSetGamePlayRecordingState(true))) {
+            printf("[switch] video capture: setup failed (0x%X)\n", rc);
+        } else {
+            printf("[switch] video capture: on (30 s clips; MC3_RECORDING=0 off)\n");
+        }
+    }
 }
 
 void switch_shutdown(void)
