@@ -171,6 +171,12 @@ static uint32_t s_pf_cdraws, s_pf_crows, s_pf_udraws;   /* constants / other uni
  * changes something). Measured before building that merge. */
 static int s_draw_changed;
 static uint32_t s_pf_same;
+/* Which uniform changed, for the draws that re-send them (by field). */
+enum { UF_SURF, UF_AA, UF_M, UF_VPOFF, UF_TSCALE, UF_C0, UF_C1, UF_FOG, UF_FC, UF_AREF,
+       UF_MV, UF_FOGPLANE, UF_FOG01, UF_SNAPY, UF_XFORM, UF_AFUNC, UF_N };
+static const char *const s_uf_name[UF_N] = { "surf", "aa", "matrix", "vpoff", "tscale",
+    "c0", "c1", "fog", "fc", "aref", "mv", "fogplane", "fog01", "snapy", "xform", "afunc" };
+static uint32_t s_pf_uf[UF_N];
 static uint64_t hz_now(void)
 {
     struct timespec ts;
@@ -3895,6 +3901,15 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
         if (!p->uni_valid || memcmp(&u, &p->uni, sizeof u) != 0) {
             s_pf_udraws++;
             s_draw_changed = 1;
+            if (s_pf_on > 0 && p->uni_valid) {
+#define UF(f, id) if (memcmp(&u.f, &p->uni.f, sizeof u.f)) s_pf_uf[id]++
+                UF(surf, UF_SURF); UF(aa, UF_AA); UF(m, UF_M); UF(vpoff, UF_VPOFF);
+                UF(tscale, UF_TSCALE); UF(c0, UF_C0); UF(c1, UF_C1); UF(fog, UF_FOG);
+                UF(fc, UF_FC); UF(aref, UF_AREF); UF(mv, UF_MV); UF(fogplane, UF_FOGPLANE);
+                UF(fog0, UF_FOG01); UF(fog1, UF_FOG01); UF(snapy, UF_SNAPY);
+                UF(xform, UF_XFORM); UF(afunc, UF_AFUNC);
+#undef UF
+            }
             p->uni = u;
             p->uni_valid = 1;
             if (p->u_surf >= 0) glUniform4fv(p->u_surf, 1, u.surf);
@@ -5427,6 +5442,22 @@ void nv2a_gl_prof_stats(double secs, char *out, size_t n)
                          s_pf_cdraws / fr, s_pf_crows / fr, s_pf_udraws / fr, s_pf_same / fr);
     for (i = 0; i < PF_N && k < n; i++)
         k += (size_t)snprintf(out + k, n - k, " %s %.1f", s_pf_name[i], s_pf_ns[i] / 1e6 / fr);
+    {   /* the uniforms that changed most, per frame */
+        int top[3] = { -1, -1, -1 }, j;
+        for (i = 0; i < UF_N; i++)
+            for (j = 0; j < 3; j++)
+                if (top[j] < 0 || s_pf_uf[i] > s_pf_uf[top[j]]) {
+                    memmove(top + j + 1, top + j, (size_t)(2 - j) * sizeof top[0]);
+                    top[j] = i;
+                    break;
+                }
+        if (k < n)
+            k += (size_t)snprintf(out + k, n - k, "; uniforms changed:");
+        for (j = 0; j < 3 && k < n; j++)
+            if (top[j] >= 0 && s_pf_uf[top[j]])
+                k += (size_t)snprintf(out + k, n - k, " %s %u", s_uf_name[top[j]], s_pf_uf[top[j]] / fr);
+        memset(s_pf_uf, 0, sizeof s_pf_uf);
+    }
     memset(s_pf_ns, 0, sizeof s_pf_ns);
     s_pf_draws = s_pf_frames = s_pf_verts = s_pf_idx = 0;
     s_pf_cdraws = s_pf_crows = s_pf_udraws = s_pf_same = 0;
