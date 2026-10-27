@@ -17,7 +17,10 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/../tools/env.sh"
 
-IMAGE=$(grep -v '^#' "$MC3_REPO/switch/devkitpro-image" | head -1)
+# VULKAN=1: the image with NVK (switch/devkitpro-nvk-image); else devkitPro's.
+IMAGE_FILE="$MC3_REPO/switch/devkitpro-image"
+[ "${VULKAN:-0}" = "1" ] && IMAGE_FILE="$MC3_REPO/switch/devkitpro-nvk-image"
+IMAGE=$(grep -v '^#' "$IMAGE_FILE" | head -1)
 command -v docker >/dev/null || mc3_fail "no docker: sudo apt install docker.io (or make setup), or NATIVE=1 with devkitPro installed"
 DOCKER=(docker)
 if ! docker info >/dev/null 2>&1; then

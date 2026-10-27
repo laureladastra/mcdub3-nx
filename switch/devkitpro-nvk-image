@@ -1,0 +1,7 @@
+# The Switch build image for VULKAN=1 (make switch-vk), pinned by digest:
+# devkitA64 with Mesa 26 for Horizon -- NVK (Vulkan) as a static
+# /opt/devkitpro/portlibs/switch/lib/libvulkan.a, plus SDL2 and FFmpeg as in
+# devkitPro's portlibs. danfromtico/switch-dev, the Mesa port nfsmw-nx runs
+# on. glslang is not in it: make glslang-switch builds it into
+# work-<game>/deps/glslang-switch. Pulled 2026-10-27.
+ghcr.io/danfromtico/switch-dev@sha256:513b5612e8d04041de0062e9a414ed96c277d4a3b7509f3dfb6082fe00f68713
