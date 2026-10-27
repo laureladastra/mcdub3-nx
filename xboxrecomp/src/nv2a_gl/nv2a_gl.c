@@ -173,6 +173,7 @@ static uint32_t s_pf_cdraws, s_pf_crows, s_pf_udraws;   /* constants / other uni
  * changes something). Measured before building that merge. */
 static int s_draw_changed;
 static uint32_t s_pf_same, s_pf_folded, s_pf_calls;
+static uint32_t s_pf_permat, s_pf_permat_calls;   /* draws folded with their own matrices */
 /* What s_draw_changed says changed (bits), and which uniforms (UF_*): the
  * census of draws that would have folded but for that (merge_census). */
 enum { DC_PROG = 1, DC_TEX = 2, DC_SAMP = 4, DC_STATE = 8, DC_CONST = 16, DC_UNI = 32,
@@ -2217,12 +2218,15 @@ static void bind_stage(const uint32_t *regs, int i, float scale[2])
 
 /* ── Programs ─────────────────────────────────────────────────────── */
 
+#define MG_DRAWS 16                 /* matrix sets in one merged call (gl_vsh.c) */
 typedef struct {
     uint64_t   vkey;            /* 0: fixed-function; else program hash */
     Nv2aPshKey pkey;
     GLuint     prog;
     GLint      u_c, u_surf, u_snapy, u_aa, u_m, u_vpoff, u_xform;
     GLint      n_c, n_m, n_mv, n_tscale, n_c0, n_c1;   /* active array sizes (arr_active) */
+    GLint      u_dend;          /* per-draw matrices of a merged call (gl_vsh.c) */
+    int        permat;          /* ... usable: all 16 sets of u_m and u_mv live */
     GLint      u_mv, u_fogplane, u_fog0, u_fog1;   /* fixed-function fog */
     GLint      u_t[4], u_tscale, u_c0, u_c1, u_fc0, u_fc1, u_fogcolor, u_afunc, u_aref;
     uint32_t   used;
@@ -2853,6 +2857,11 @@ static GlProg *prog_register(uint64_t vkey, const Nv2aPshKey *pk, GLuint prog)
     p->n_tscale = arr_active(p->prog, "u_tscale", 4);
     p->n_c0 = arr_active(p->prog, "u_c0", 8);
     p->n_c1 = arr_active(p->prog, "u_c1", 8);
+    p->u_dend = glGetUniformLocation(p->prog, "u_dend");
+    p->permat = p->u_dend >= 0 && arr_active(p->prog, "u_m", MG_DRAWS * 4) == MG_DRAWS * 4
+                && arr_active(p->prog, "u_dend", MG_DRAWS) == MG_DRAWS
+                && (glGetUniformLocation(p->prog, "u_mv") < 0
+                    || arr_active(p->prog, "u_mv", MG_DRAWS * 4) == MG_DRAWS * 4);
     p->vpc_rows = p->u_c >= 0 && glGetUniformLocation(p->prog, "c[191]") == p->u_c + 191;
     p->u_surf = glGetUniformLocation(p->prog, "u_surf");
     p->u_snapy = glGetUniformLocation(p->prog, "u_snapy");
@@ -2880,6 +2889,8 @@ static GlProg *prog_register(uint64_t vkey, const Nv2aPshKey *pk, GLuint prog)
         if (p->u_t[i] >= 0)
             glUniform1i(p->u_t[i], i);
     }
+    if (p->u_dend >= 0)
+        glUniform1i(p->u_dend, 0x7FFFFFFF);    /* one draw: set 0 */
     return p;
 }
 
@@ -3643,9 +3654,12 @@ static int ring_alloc_exact(GlRing *g, GLintptr at, GLsizeiptr size, void **ptr)
  * Triangle lists (quads are triangulated already; strips and fans are
  * converted below). Attributes interleaved in one range with one stride
  * grow in place in the ring; those from several buffers or converted on the
- * CPU are held in staging (GlStageLayout). RECOMP_GL_MERGE=2: the first
- * kind only. Why draws did not fold: the census in the perf report
- * ("GL no fold"; flythrough 2026-10-27: textures, then matrices). */
+ * CPU, read with two strides or with stride 0 are held in staging
+ * (GlStageLayout). RECOMP_GL_MERGE=2: the first kind only. A fixed-function
+ * draw that differs only in its matrices folds too, with its own set
+ * (MG_DRAWS per call, gl_vsh.c's u_dend). Why draws did not fold: the
+ * census in the perf report ("GL no fold"; 2026-10-27: textures, vertex
+ * program constants, matrices). */
 typedef struct {
     const uint8_t *lo;
     GLsizeiptr bytes;
@@ -3659,9 +3673,11 @@ typedef struct {
  * the batch goes up as one allocation when it is flushed (merge_flush).
  * Compared whole (memcmp): two draws fold when it is the same. */
 #define MG_STREAMS (NV2A_RAW_ATTRS + 1)
+enum { MG_RANGE, MG_REPEAT, MG_PACK };      /* a buffer's bytes; one value; float4 */
 typedef struct {
     uint32_t present, direct, nst, np;
     uint32_t stride[MG_STREAMS];
+    uint32_t kind[MG_STREAMS];              /* MG_RANGE, MG_REPEAT, MG_PACK */
     int32_t  st_of[NV2A_RAW_ATTRS];         /* stream of each present attribute */
     uint32_t off[NV2A_RAW_ATTRS];           /* its byte offset in that stream's vertex */
     uint32_t type[NV2A_RAW_ATTRS], size[NV2A_RAW_ATTRS];
@@ -3678,6 +3694,14 @@ static struct {
     uint32_t maxv;
     int staged;                             /* held in s_stg (GlStageLayout) */
     GlStageLayout slay;
+    /* Per-draw matrices (gl_vsh.c's u_dend): draws that differ from the
+     * held one in the fixed-function matrices alone fold in with their own
+     * set; nd sets, set i for indices below dend[i]. */
+    GlProg *prog;
+    int nd, permat, defer;
+    GLint dend[MG_DRAWS];
+    float pm[MG_DRAWS][16], pmv[MG_DRAWS][16];
+    uint32_t last_end;                      /* the folded draw's last index + 1 */
 } s_mg;
 static struct { uint8_t *p; size_t len, cap; } s_stg[MG_STREAMS];
 #define MG_STAGE_MAX (3u << 20)             /* below a ring quarter (ring_alloc) */
@@ -3788,49 +3812,143 @@ static int merge_append(const Nv2aRawBatch *b, const uint32_t *idx, uint32_t n,
         return 0;                   /* (vertices written: harmless, unused) */
     if (k + b->vertex_count > s_mg.maxv)
         s_mg.maxv = k + b->vertex_count;
+    s_mg.last_end = k + b->vertex_count;
     s_pf_folded++;
     return 1;
 }
 
-/* The staged layout of `b` (GlStageLayout), its vertex buffers' byte ranges
- * in run[]: 0 if it has none (a stride of 0 or above 512, two strides in one
- * buffer, no attributes). */
+/* Bytes of one element of a direct attribute. */
+static uint32_t attr_elem_bytes(const Nv2aRawBatch *b, uint32_t a)
+{
+    switch (b->direct[a].type) {
+    case 0:  return 4;
+    case 2:  return 4 * b->direct[a].size;
+    case 4:  return b->direct[a].size;
+    default: return 2 * b->direct[a].size;
+    }
+}
+
+/* A layout staging refused (stride above 512, too many streams): the first
+ * few, once, with MC3_PERF -- what the census counts as "strides". */
+static void stage_refused(const Nv2aRawBatch *b, const char *why)
+{
+    static uint32_t seen[8];
+    static int nseen;
+    uint32_t a, key = b->attr_present | (uint32_t)b->attr_direct << 16;
+    int i;
+    char line[400];
+    size_t q = 0;
+    if (s_pf_on <= 0 || nseen >= 8)
+        return;
+    for (i = 0; i < nseen; i++)
+        if (seen[i] == key)
+            return;
+    seen[nseen++] = key;
+    q += (size_t)snprintf(line + q, sizeof line - q, "  [GL] merge refused (%s): attrs %04X direct %04X,"
+                          " %u verts:", why, b->attr_present, b->attr_direct, b->vertex_count);
+    for (a = 0; a < NV2A_RAW_ATTRS && q < sizeof line - 40; a++)
+        if (b->attr_direct & (1u << a))
+            q += (size_t)snprintf(line + q, sizeof line - q, " a%u type %u x%u stride %u", a,
+                                  b->direct[a].type, b->direct[a].size, b->direct[a].stride);
+    fprintf(stderr, "%s\n", line);
+}
+
+/* The staged layout of `b` (GlStageLayout) and each stream's source bytes
+ * in run[]: attributes read from one buffer with one stride share a stream
+ * (the bytes they span, from a 4-aligned start); the same bytes read with
+ * another stride make another stream (copied twice); a stride-0 attribute
+ * (one value for every vertex) gets a stream of its own, the value repeated
+ * per vertex; converted ones are packed float4 (b->attrs). 0 if it has
+ * none: a stride above 512, no attributes. */
 static int stage_layout(const Nv2aRawBatch *b, GlStageLayout *L, VRun *run)
 {
-    int of_run[NV2A_RAW_ATTRS];
-    uint32_t nrun, a;
-    if (!b->vertex_count || !b->attr_present)
+    int32_t of[NV2A_RAW_ATTRS];
+    uint32_t nst = 0, a, i, nv = b->vertex_count;
+    if (!nv || !b->attr_present)
         return 0;
     if ((b->attr_present & ~b->attr_direct) && !b->attrs)
         return 0;
     memset(L, 0, sizeof *L);
     L->present = b->attr_present;
     L->direct = b->attr_direct;
-    nrun = vertex_runs(b, run, of_run);
     for (a = 0; a < NV2A_RAW_ATTRS; a++) {
-        L->st_of[a] = -1;
+        uint32_t stride = b->direct[a].stride, elem;
+        const uint8_t *lo, *hi;
+        L->st_of[a] = of[a] = -1;
         if (!(b->attr_direct & (1u << a)))
             continue;
-        if (!b->direct[a].stride || b->direct[a].stride > 512)
+        if (stride > 512) {
+            stage_refused(b, "stride above 512");
             return 0;
-        if (L->stride[of_run[a]] && L->stride[of_run[a]] != b->direct[a].stride)
-            return 0;
-        L->stride[of_run[a]] = b->direct[a].stride;
-        L->st_of[a] = of_run[a];
-        L->off[a] = (uint32_t)(b->direct[a].ptr - run[of_run[a]].lo);
+        }
+        elem = attr_elem_bytes(b, a);
+        if (!stride) {                          /* one value: repeated per vertex */
+            run[nst].lo = b->direct[a].ptr;
+            run[nst].hi = b->direct[a].ptr + elem;
+            L->kind[nst] = MG_REPEAT;
+            L->stride[nst] = (elem + 3) & ~3u;
+            of[a] = (int32_t)nst++;
+            continue;
+        }
+        lo = (const uint8_t *)((uintptr_t)b->direct[a].ptr & ~(uintptr_t)3);
+        hi = b->direct[a].ptr + (size_t)(nv - 1) * stride + elem;
+        for (i = 0; i < nst; i++)
+            if (L->kind[i] == MG_RANGE && L->stride[i] == stride && lo <= run[i].hi && run[i].lo <= hi)
+                break;
+        if (i == nst) {
+            run[nst].lo = lo;
+            run[nst].hi = hi;
+            L->kind[nst] = MG_RANGE;
+            L->stride[nst] = stride;
+            nst++;
+        } else {
+            if (lo < run[i].lo) run[i].lo = lo;
+            if (hi > run[i].hi) run[i].hi = hi;
+        }
+        of[a] = (int32_t)i;
+    }
+    /* A widened range can now overlap another of its stride: merge. */
+    for (i = 0; i + 1 < nst; ) {
+        uint32_t j;
+        for (j = i + 1; j < nst; j++)
+            if (L->kind[i] == MG_RANGE && L->kind[j] == MG_RANGE && L->stride[i] == L->stride[j]
+                && run[j].lo <= run[i].hi && run[i].lo <= run[j].hi)
+                break;
+        if (j == nst) { i++; continue; }
+        if (run[j].lo < run[i].lo) run[i].lo = run[j].lo;
+        if (run[j].hi > run[i].hi) run[i].hi = run[j].hi;
+        for (a = 0; a < NV2A_RAW_ATTRS; a++) {
+            if (of[a] == (int32_t)j) of[a] = (int32_t)i;
+            else if (of[a] == (int32_t)(nst - 1)) of[a] = (int32_t)j;
+        }
+        run[j] = run[nst - 1];
+        L->kind[j] = L->kind[nst - 1];
+        L->stride[j] = L->stride[nst - 1];
+        L->kind[nst - 1] = 0;
+        L->stride[nst - 1] = 0;
+        nst--;
+    }
+    for (a = 0; a < NV2A_RAW_ATTRS; a++) {
+        if (of[a] < 0)
+            continue;
+        L->st_of[a] = of[a];
+        L->off[a] = (uint32_t)(b->direct[a].ptr - run[of[a]].lo);
         L->type[a] = b->direct[a].type;
         L->size[a] = b->direct[a].size;
     }
     for (a = 0; a < NV2A_RAW_ATTRS; a++)
         if ((b->attr_present & ~b->attr_direct) & (1u << a)) {
-            L->st_of[a] = (int32_t)nrun;
+            L->st_of[a] = (int32_t)nst;
             L->off[a] = L->np * 16;
             L->slot[L->np++] = (uint8_t)a;
         }
-    L->nst = nrun + (L->np ? 1 : 0);
-    if (L->np)
-        L->stride[nrun] = L->np * 16;
-    return L->nst > 0;
+    if (L->np) {
+        L->kind[nst] = MG_PACK;
+        L->stride[nst] = L->np * 16;
+        nst++;
+    }
+    L->nst = nst;
+    return nst > 0;
 }
 
 /* Append b's vertices to the staged streams, its indices shifted to them:
@@ -3839,7 +3957,7 @@ static int stage_layout(const Nv2aRawBatch *b, GlStageLayout *L, VRun *run)
 static int stage_append(const Nv2aRawBatch *b, const GlStageLayout *L, const VRun *run,
                         const uint32_t *idx, uint32_t n)
 {
-    uint32_t st, nv = b->vertex_count, nrun = L->nst - (L->np ? 1 : 0), v, i;
+    uint32_t st, nv = b->vertex_count, v, i;
     uint64_t k = 0, total = 0;
     for (st = 0; st < L->nst; st++) {
         uint64_t c = (s_stg[st].len + L->stride[st] - 1) / L->stride[st];
@@ -3848,15 +3966,18 @@ static int stage_append(const Nv2aRawBatch *b, const GlStageLayout *L, const VRu
     if (k + nv > 0x7FFFFFFFu)
         return 0;
     for (st = 0; st < L->nst; st++) {
-        uint64_t need = st < nrun ? k * L->stride[st] + (uint64_t)(run[st].hi - run[st].lo)
-                                  : (k + nv) * L->stride[st];
+        uint64_t need = L->kind[st] == MG_RANGE
+                        ? k * L->stride[st] + (uint64_t)(run[st].hi - run[st].lo)
+                        : (k + nv) * L->stride[st];
         total += (need + 63) & ~(uint64_t)63;
     }
     if (total > MG_STAGE_MAX)
         return 0;
     for (st = 0; st < L->nst; st++) {
         size_t at = (size_t)k * L->stride[st];
-        size_t bytes = st < nrun ? (size_t)(run[st].hi - run[st].lo) : (size_t)nv * L->stride[st];
+        size_t bytes = L->kind[st] == MG_RANGE ? (size_t)(run[st].hi - run[st].lo)
+                                               : (size_t)nv * L->stride[st];
+        uint8_t *o;
         if (at + bytes > s_stg[st].cap) {
             size_t cap = (at + bytes) * 2 + 65536;
             uint8_t *p = (uint8_t *)realloc(s_stg[st].p, cap);
@@ -3865,10 +3986,15 @@ static int stage_append(const Nv2aRawBatch *b, const GlStageLayout *L, const VRu
             s_stg[st].p = p;
             s_stg[st].cap = cap;
         }
-        if (st < nrun) {
-            memcpy(s_stg[st].p + at, run[st].lo, bytes);
+        o = s_stg[st].p + at;
+        if (L->kind[st] == MG_RANGE) {
+            memcpy(o, run[st].lo, bytes);
+        } else if (L->kind[st] == MG_REPEAT) {
+            size_t e = (size_t)(run[st].hi - run[st].lo);
+            for (v = 0; v < nv; v++)
+                memcpy(o + (size_t)v * L->stride[st], run[st].lo, e);
         } else {
-            float *out = (float *)(s_stg[st].p + at);
+            float *out = (float *)o;
             for (v = 0; v < nv; v++)
                 for (i = 0; i < L->np; i++)
                     memcpy(out + ((size_t)v * L->np + i) * 4,
@@ -3881,7 +4007,34 @@ static int stage_append(const Nv2aRawBatch *b, const GlStageLayout *L, const VRu
         return 0;                   /* (vertices staged: harmless, unused) */
     if (k + nv > s_mg.maxv)
         s_mg.maxv = (uint32_t)(k + nv);
+    s_mg.last_end = (uint32_t)(k + nv);
     return 1;
+}
+
+/* A draw joined the held one: a new matrix set if its matrices differ
+ * (deferred in gl_draw_raw), else the last set covers its indices too. */
+static void merge_note(const GlProg *p)
+{
+    int j = s_mg.nd - 1;
+    if (s_mg.defer) {
+        s_mg.defer = 0;
+        s_mg.permat = 1;
+        j = s_mg.nd++;
+        memcpy(s_mg.pm[j], p->uni.m, sizeof s_mg.pm[j]);
+        memcpy(s_mg.pmv[j], p->uni.mv, sizeof s_mg.pmv[j]);
+    }
+    s_mg.dend[j] = (GLint)s_mg.last_end;
+}
+
+/* A draw is held: its matrices are set 0. */
+static void merge_note_first(GlProg *p, uint32_t nv)
+{
+    s_mg.prog = p;
+    s_mg.nd = 1;
+    s_mg.permat = s_mg.defer = 0;
+    memcpy(s_mg.pm[0], p->uni.m, sizeof s_mg.pm[0]);
+    memcpy(s_mg.pmv[0], p->uni.mv, sizeof s_mg.pmv[0]);
+    s_mg.dend[0] = (GLint)nv;
 }
 
 /* The staged streams into the ring, and the attributes pointed at them. */
@@ -3942,6 +4095,8 @@ static void stage_upload(void)
  * while one is held; its time goes to the "draw" phase of the profile. */
 static void merge_flush(void)
 {
+    GlProg *mp;
+    int pd;
     GLintptr at;
     void *dst = NULL;
     uint64_t t0;
@@ -3952,6 +4107,16 @@ static void merge_flush(void)
     t0 = hz_now();
     if (s_mg.staged)
         stage_upload();
+    mp = s_mg.prog;
+    pd = mp && s_mg.permat && s_mg.nd > 1;
+    if (pd) {                           /* each draw's matrices (gl_vsh.c) */
+        s_mg.dend[s_mg.nd - 1] = 0x7FFFFFFF;
+        p_glUniform4fv(mp->u_m, s_mg.nd * 4, &s_mg.pm[0][0]);
+        if (mp->u_mv >= 0)
+            p_glUniform4fv(mp->u_mv, s_mg.nd * 4, &s_mg.pmv[0][0]);
+        p_glUniform1iv(mp->u_dend, s_mg.nd, s_mg.dend);
+        s_pf_permat_calls++;
+    }
     if (s_mg.maxv <= 65536) {
         uint16_t *o;
         static uint16_t *tmp;
@@ -3978,6 +4143,14 @@ static void merge_flush(void)
         ring_done(&s_iring, at, (GLsizeiptr)s_mg.n * 4, dst, s_mg.idx);
         p_glDrawElements(s_mg.mode, (GLsizei)s_mg.n, GL_UNSIGNED_INT, (const void *)(uintptr_t)at);
     }
+    if (pd || (mp && s_mg.defer)) {     /* back to one set: the program's latest */
+        if (mp->u_m >= 0)
+            p_glUniform4fv(mp->u_m, 4, mp->uni.m);
+        if (mp->u_mv >= 0)
+            p_glUniform4fv(mp->u_mv, 4, mp->uni.mv);
+        p_glUniform1i(mp->u_dend, 0x7FFFFFFF);
+    }
+    s_mg.permat = s_mg.defer = 0;
     s_pf_calls++;
     if (s_pf_on > 0) {
         uint64_t dt = hz_now() - t0;
@@ -4295,6 +4468,33 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
         if (p->u_fog0 >= 0)                     /* every program applies the fog unit */
             nv2a_ffp_fog_uniforms(r, u.mv, u.fogplane, u.fog0, u.fog1);
         u.afunc = r[0x300 / 4] ? (GLint)r[0x33C / 4] : 0x207;
+        if (p->uni_valid) {
+            /* Values this draw does not read stay as GL has them (and as the
+             * cache says), so a change there neither costs an upload nor
+             * stops a merge: the composite matrix outside fixed-function
+             * transform, the model-view rows and fog plane without a fog
+             * distance (fog off, or factor from specular alpha or FOG_X). */
+            int fogd = u.fog0[0] != 0.0f && u.fog0[1] != 0.0f && u.fog0[1] != 6.0f;
+            if (u.xform != 1)
+                memcpy(u.m, p->uni.m, sizeof u.m);
+            if (!fogd) {
+                memcpy(u.mv, p->uni.mv, sizeof u.mv);
+                memcpy(u.fogplane, p->uni.fogplane, sizeof u.fogplane);
+            }
+        }
+        if (p->uni_valid && s_mg_active && s_mg.prog == p && p->permat && !s_draw_changed
+            && s_mg.nd < MG_DRAWS && u.xform == 1 && memcmp(&u, &p->uni, sizeof u) != 0) {
+            /* Only the matrices differ from the held draw: this one may fold
+             * with a set of its own (merge_note); GL gets them at the flush,
+             * which then puts the latest back as set 0. */
+            struct GlUni t2 = u;
+            memcpy(t2.m, p->uni.m, sizeof t2.m);
+            memcpy(t2.mv, p->uni.mv, sizeof t2.mv);
+            if (!memcmp(&t2, &p->uni, sizeof t2)) {
+                p->uni = u;
+                s_mg.defer = 1;
+            }
+        }
         if (!p->uni_valid || memcmp(&u, &p->uni, sizeof u) != 0) {
             s_pf_udraws++;
             s_draw_changed |= DC_UNI;
@@ -4652,7 +4852,7 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
         ml = s_merge_on && mmode == GL_TRIANGLES && !s_watch_hit && s_finish <= 0
              && merge_layout(b, &L);
         sl = !ml && s_merge_on && s_merge_on != 2 && mmode == GL_TRIANGLES && !s_watch_hit
-             && s_finish <= 0 && (s_mno_last == MNO_RUNS || s_mno_last == MNO_CONV)
+             && s_finish <= 0 && (s_mno_last == MNO_RUNS || s_mno_last == MNO_CONV || s_mno_last == MNO_STRIDE)
              && stage_layout(b, &SL, srun);
         if (s_pf_on > 0)
             merge_census(ml || sl, s_mg_was_active && s_mg.s == s && s_mg.ds == s->ds_on
@@ -4664,6 +4864,8 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
             && s_mg.ds == s->ds_on && s_mg.mode == mmode && !memcmp(&SL, &s_mg.slay, sizeof SL)
             && stage_append(b, &SL, srun, midx, mn)) {
             s_pf_folded++;
+            s_pf_permat += s_mg.defer;
+            merge_note(p);
             pf_mark(PF_VTX);
             if (s_pf_on > 0) {
                 s_pf_draws++;
@@ -4677,6 +4879,8 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
             && s_mg.mode == mmode && L.stride == s_mg.lay.stride
             && !memcmp(L.sig, s_mg.lay.sig, sizeof L.sig)
             && merge_append(b, midx, mn, &L)) {
+            s_pf_permat += s_mg.defer;
+            merge_note(p);
             pf_mark(PF_VTX);
             if (s_pf_on > 0) {
                 s_pf_draws++;
@@ -4701,6 +4905,7 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
             for (a = 0; a < NV2A_RAW_ATTRS; a++)
                 attr_enable(a, (b->attr_present >> a) & 1);
             if (stage_append(b, &SL, srun, midx, mn)) {
+                merge_note_first(p, b->vertex_count);
                 s_mg_active = 1;
                 pf_mark(PF_VTX);
                 if (s_pf_on > 0) {
@@ -4724,6 +4929,7 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
             s_mg.n = 0;
             s_mg.maxv = b->vertex_count;
             if (merge_add_indices(midx, mn, 0)) {
+                merge_note_first(p, b->vertex_count);
                 s_mg_active = 1;
                 pf_mark(PF_VTX);
                 if (s_pf_on > 0) {
@@ -6010,7 +6216,9 @@ void nv2a_gl_prof_stats(double secs, char *out, size_t n)
             q += (size_t)snprintf(line + q, sizeof line - q, ";");
             s_census[best].n = 0;
         }
-        fprintf(stderr, "%s rest %u\n", line, s_census_other / fr);
+        fprintf(stderr, "%s rest %u; folded with own matrices %u (in %u calls)\n", line,
+                s_census_other / fr, s_pf_permat / fr, s_pf_permat_calls / fr);
+        s_pf_permat = s_pf_permat_calls = 0;
         memset(s_census, 0, sizeof s_census);
         s_census_nolay = s_census_nohold = s_census_other = 0;
     }

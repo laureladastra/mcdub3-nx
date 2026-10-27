@@ -273,7 +273,7 @@ int nv2a_gl_vsh_program(const uint32_t (*prog)[4], uint32_t slots,
 /* Fixed-function fog inputs (see nv2a_ffp_fog below); in Vulkan they are
  * members of the VsU block instead. */
 #define NV2A_FFP_FOG_DECL \
-    "uniform vec4 u_mv[4];     /* model-view rows (fog distance) */\n" \
+    "uniform vec4 u_mv[4 * 16]; /* model-view rows (fog distance), per draw */\n" \
     "uniform vec4 u_fogplane;\n" \
     "uniform vec4 u_fog0;      /* enabled, gen, equation, abs */\n" \
     "uniform vec4 u_fog1;      /* param0, param1 */\n"
@@ -313,6 +313,8 @@ static const char s_vk_prelude[] =
      * repeats one mesh with each instance's own set. NV2A_VK_INSTANCES. */
     "layout(std140, set = 0, binding = 6) uniform VsC { vec4 c[192 * 16]; };\n"
     "int nv2a_ib;\n"
+    "int nv2a_di;\n"
+    "int nv2a_draw_index() { return 0; }\n"
     "layout(location = 0) out vec4 vD0; layout(location = 1) out vec4 vD1;\n"
     "layout(location = 2) out vec4 vT0; layout(location = 3) out vec4 vT1;\n"
     "layout(location = 4) out vec4 vT2; layout(location = 5) out vec4 vT3;\n"
@@ -382,7 +384,18 @@ const char *nv2a_gl_vsh_prelude(void)
         "uniform vec4 u_surf;      /* 2/W, 2/H, 1/zmax, scale offset */\n"
         "uniform float u_snapy;    /* scale offset, y (square pixels) */\n"
         "uniform vec2 u_aa;        /* logical -> real pixels */\n"
-        "uniform vec4 u_m[4];      /* fixed-function composite rows */\n"
+        "uniform vec4 u_m[4 * 16]; /* fixed-function composite rows, per draw */\n"
+        /* Draws merged into one call (nv2a_gl.c, merge_flush) each with its
+         * own matrices: draw i's vertices end at index u_dend[i], its rows
+         * are u_m / u_mv [4i .. 4i+3]. One draw: u_dend[0] is past every
+         * index, set 0. */
+        "uniform int u_dend[16];\n"
+        "int nv2a_di;\n"
+        "int nv2a_draw_index() {\n"
+        "    int i = 0;\n"
+        "    while (i < 15 && gl_VertexID >= u_dend[i]) i++;\n"
+        "    return i * 4;\n"
+        "}\n"
         "uniform vec4 u_vpoff;     /* fixed-function viewport offset */\n"
         NV2A_FFP_FOG_DECL
         "out vec4 vD0; out vec4 vD1; out vec4 vT0; out vec4 vT1;\n"
@@ -475,7 +488,8 @@ const char *nv2a_gl_vsh_main_program(void)
     "    if (u_fog0.x == 0.0) return 1.0;\n" \
     "    int gen = int(u_fog0.y);\n" \
     "    if (gen == 0) return v4.a;                       /* SPEC_ALPHA */\n" \
-    "    vec3 eye = vec3(dot(u_mv[0], v0), dot(u_mv[1], v0), dot(u_mv[2], v0));\n" \
+    "    vec3 eye = vec3(dot(u_mv[nv2a_di], v0), dot(u_mv[nv2a_di + 1], v0),\n" \
+    "                    dot(u_mv[nv2a_di + 2], v0));\n" \
     "    float d;\n" \
     "    if (gen == 1) d = length(eye);                   /* RADIAL */\n" \
     "    else if (gen == 6) d = v5.x;                     /* FOG_X */\n" \
@@ -549,9 +563,10 @@ const char *nv2a_gl_vsh_fixed(void)
         "uniform int u_xform;      /* 0 pre-transformed, 1 fixed-function */\n"
         NV2A_FFP_FOG_GLSL
         "void main() {\n"
+        "    nv2a_di = nv2a_draw_index();\n"
         "    if (u_xform == 1) {\n"
-        "        vec4 clip = vec4(dot(u_m[0], v0), dot(u_m[1], v0),\n"
-        "                         dot(u_m[2], v0), dot(u_m[3], v0));\n"
+        "        vec4 clip = vec4(dot(u_m[nv2a_di], v0), dot(u_m[nv2a_di + 1], v0),\n"
+        "                         dot(u_m[nv2a_di + 2], v0), dot(u_m[nv2a_di + 3], v0));\n"
         "        float w = abs(clip.w) < 1e-6 ? 1e-6 : clip.w;\n"
         "        vec3 sw = clip.xyz + u_vpoff.xyz * w;\n"
         "        sw.xy *= u_aa;\n"
