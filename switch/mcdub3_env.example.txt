@@ -51,6 +51,12 @@
 # Mipmaps: smoother textures in the distance, less shimmering.
 #RECOMP_GL_MIPS=1
 
+# When many textures arrive at once (a race start), their mip levels follow
+# over the next frames instead of all in one long frame: after this many ms
+# of texture uploads in a frame (0 = never), at most _DRAIN_MS a frame.
+#RECOMP_GL_MIP_DEFER_MS=4
+#RECOMP_GL_MIP_DRAIN_MS=2
+
 # Anisotropic filtering: sharp textures at shallow angles (roads far ahead).
 # 1 = off, up to 16. The Switch's default is 4: 16 costs its GPU much more
 # for detail its screen hardly shows (Mac, Linux, Windows: 16).
