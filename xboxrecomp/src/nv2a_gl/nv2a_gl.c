@@ -2054,7 +2054,10 @@ static void depth_tex_prepare(const uint32_t *regs, const Nv2aRawBatch *b)
 }
 
 /* RECOMP_GL_ANISO: anisotropic filtering of mipmapped textures, 1..16
- * (default 16, 1 = off; capped by the driver). RECOMP_GL_LOD_BIAS: mip
+ * (default 16, on the Switch 4; 1 = off; capped by the driver). 16x costs
+ * desktop GPUs next to nothing; on the Switch's it multiplies the texture
+ * reads of the road and the buildings, most of a race frame, for detail at
+ * grazing angles a 720p screen hardly shows (2026-10-27). RECOMP_GL_LOD_BIAS: mip
  * bias, negative = sharper (default -0.25). Both as nfsu2-sw's Vulkan. */
 static float s_aniso_max = -1.0f;          /* the driver's, 1 = none */
 static float tex_aniso(void);
@@ -2070,7 +2073,11 @@ static float tex_aniso(void)
     if (a < 0.0f) {
         const char *e = getenv("RECOMP_GL_ANISO");
         GLfloat mx = 0.0f;
+#if defined(__SWITCH__)
+        a = e ? (float)atof(e) : 4.0f;
+#else
         a = e ? (float)atof(e) : 16.0f;
+#endif
         while (glGetError() != GL_NO_ERROR) { }
         {
             GLint mi = 0;
