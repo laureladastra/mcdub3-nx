@@ -41,6 +41,7 @@
 #endif
 #include <unistd.h>
 #include "gl_api.h"
+#include "gl_merge.h"       /* state-changing GL calls flush a held draw first */
 #include "gl_psh.h"
 #include "gl_vsh.h"
 #include "../platform/host_main.h"
@@ -170,7 +171,7 @@ static uint32_t s_pf_cdraws, s_pf_crows, s_pf_udraws;   /* constants / other uni
  * fold into their predecessor (s_draw_changed is set wherever a draw
  * changes something). Measured before building that merge. */
 static int s_draw_changed;
-static uint32_t s_pf_same;
+static uint32_t s_pf_same, s_pf_folded, s_pf_calls;
 /* Which uniform changed, for the draws that re-send them (by field). */
 enum { UF_SURF, UF_AA, UF_M, UF_VPOFF, UF_TSCALE, UF_C0, UF_C1, UF_FOG, UF_FC, UF_AREF,
        UF_MV, UF_FOGPLANE, UF_FOG01, UF_SNAPY, UF_XFORM, UF_AFUNC, UF_N };
@@ -3599,6 +3600,184 @@ static void ring_done(GlRing *g, GLintptr at, GLsizeiptr size, void *ptr,
         glBufferSubData(g->target, at, size, fallback);
 }
 
+/* Space for `size` bytes at exactly `at` (no earlier than what the ring has
+ * handed out): 0 if it does not fit without wrapping. For a merged draw,
+ * whose vertices must follow the held draw's at a multiple of its stride. */
+static int ring_alloc_exact(GlRing *g, GLintptr at, GLsizeiptr size, void **ptr)
+{
+    if (at < g->off || at + size > g->cap)
+        return 0;
+    glBindBuffer(g->target, g->buf);
+    if (g->pmap) {
+        int end;
+        if (size > g->cap / RING_SEGS)
+            return 0;
+        end = (int)((at + size - 1) / (g->cap / RING_SEGS));
+        while (g->seg != end)
+            ring_enter(g, g->seg + 1);
+        g->off = at + size;
+        *ptr = g->pmap + at;
+        return 1;
+    }
+    g->off = at + size;
+    *ptr = glMapBufferRange(g->target, at, size, GL_MAP_WRITE_BIT | GL_MAP_UNSYNCHRONIZED_BIT);
+    return 1;
+}
+
+/* ── Merging consecutive draws (RECOMP_GL_MERGE=0 off) ───────────────
+ *
+ * On the Switch each draw call costs ~17 us in Mesa, ~1,300 a race frame;
+ * a fifth of MC3's draws change nothing since the one before (title
+ * flythrough, 2026-10-27) -- same surface, program, textures, state and
+ * uniforms. Such a draw is not issued but held: the next one that changes
+ * nothing is folded into it -- its vertices written after the held ones,
+ * its indices shifted to them -- and the batch goes to GL as one call when
+ * anything changes (every state-changing GL call flushes first,
+ * gl_merge.h), at a clear, blit or flip, or when the queue runs dry.
+ * Only what folds without conversion: triangle lists (quads are
+ * triangulated already) whose attributes are interleaved in one range with
+ * one stride, none converted on the CPU. */
+typedef struct {
+    const uint8_t *lo;
+    GLsizeiptr bytes;
+    uint32_t stride;
+    uint32_t sig[2 + 3 * NV2A_RAW_ATTRS];
+} GlMergeLayout;
+static struct {
+    const GlSurf *s;
+    GLuint ds;
+    GLenum mode;
+    GLintptr vbase;
+    GlMergeLayout lay;
+    uint32_t *idx;
+    size_t n, cap;
+    uint32_t maxv;
+} s_mg;
+static int s_merge_on = -1;
+
+/* A byte range of vertex data (vertex_runs, below). */
+typedef struct { const uint8_t *lo, *hi; GLintptr at; } VRun;
+static uint32_t vertex_runs(const Nv2aRawBatch *b, VRun *run, int *of_run);
+
+static int merge_layout(const Nv2aRawBatch *b, GlMergeLayout *L)
+{
+    VRun run[NV2A_RAW_ATTRS];
+    int of_run[NV2A_RAW_ATTRS];
+    uint32_t a, stride = 0;
+    if (!b->vertex_count || (b->attr_present & ~b->attr_direct))
+        return 0;                                   /* converted attributes */
+    if (vertex_runs(b, run, of_run) != 1)
+        return 0;
+    memset(L->sig, 0, sizeof L->sig);
+    L->sig[0] = b->attr_present;
+    L->sig[1] = b->attr_direct;
+    for (a = 0; a < NV2A_RAW_ATTRS; a++) {
+        if (!(b->attr_direct & (1u << a)))
+            continue;
+        if (!stride)
+            stride = b->direct[a].stride;
+        if (b->direct[a].stride != stride)
+            return 0;
+        L->sig[2 + 3 * a] = b->direct[a].type | (b->direct[a].size << 8);
+        L->sig[3 + 3 * a] = (uint32_t)(b->direct[a].ptr - run[0].lo);   /* offset in the vertex */
+        L->sig[4 + 3 * a] = 1;
+    }
+    if (!stride || stride > 512)
+        return 0;
+    L->lo = run[0].lo;
+    L->bytes = (GLsizeiptr)(run[0].hi - run[0].lo);
+    L->stride = stride;
+    return 1;
+}
+
+static int merge_add_indices(const uint32_t *idx, uint32_t n, uint32_t k)
+{
+    uint32_t i;
+    if (s_mg.n + n > s_mg.cap) {
+        size_t cap = (s_mg.n + n) * 2 + 4096;
+        uint32_t *p = (uint32_t *)realloc(s_mg.idx, cap * 4);
+        if (!p)
+            return 0;
+        s_mg.idx = p;
+        s_mg.cap = cap;
+    }
+    for (i = 0; i < n; i++)
+        s_mg.idx[s_mg.n + i] = idx[i] + k;
+    s_mg.n += n;
+    return 1;
+}
+
+/* Fold a draw that changed nothing into the held one: 0 if it does not fit. */
+static int merge_append(const Nv2aRawBatch *b, const uint32_t *idx, uint32_t n,
+                        const GlMergeLayout *L)
+{
+    GLintptr rel = s_vring.off - s_mg.vbase, at;
+    uint32_t k;
+    void *ptr = NULL;
+    rel = (rel + (GLintptr)L->stride - 1) / (GLintptr)L->stride * (GLintptr)L->stride;
+    at = s_mg.vbase + rel;
+    k = (uint32_t)(rel / (GLintptr)L->stride);
+    if ((uint64_t)k + b->vertex_count > 0x7FFFFFFFu)
+        return 0;
+    if (!ring_alloc_exact(&s_vring, at, L->bytes, &ptr))
+        return 0;
+    if (ptr)
+        memcpy(ptr, L->lo, (size_t)L->bytes);
+    ring_done(&s_vring, at, L->bytes, ptr, L->lo);
+    if (!merge_add_indices(idx, n, k))
+        return 0;                   /* (vertices written: harmless, unused) */
+    if (k + b->vertex_count > s_mg.maxv)
+        s_mg.maxv = k + b->vertex_count;
+    s_pf_folded++;
+    return 1;
+}
+
+/* Issue the held draw. Called by every state-changing GL call (gl_merge.h)
+ * while one is held; its time goes to the "draw" phase of the profile. */
+static void merge_flush(void)
+{
+    GLintptr at;
+    void *dst = NULL;
+    uint64_t t0;
+    size_t i;
+    if (!s_mg_active)
+        return;
+    s_mg_active = 0;
+    t0 = hz_now();
+    if (s_mg.maxv <= 65536) {
+        uint16_t *o;
+        static uint16_t *tmp;
+        static size_t tmp_cap;
+        at = ring_alloc(&s_iring, (GLsizeiptr)s_mg.n * 2, &dst);
+        o = (uint16_t *)dst;
+        if (!o) {
+            if (s_mg.n > tmp_cap) {
+                free(tmp);
+                tmp_cap = s_mg.n + 4096;
+                tmp = (uint16_t *)malloc(tmp_cap * 2);
+                if (!tmp) { tmp_cap = 0; return; }
+            }
+            o = tmp;
+        }
+        for (i = 0; i < s_mg.n; i++)
+            o[i] = (uint16_t)s_mg.idx[i];
+        ring_done(&s_iring, at, (GLsizeiptr)s_mg.n * 2, dst, tmp);
+        p_glDrawElements(s_mg.mode, (GLsizei)s_mg.n, GL_UNSIGNED_SHORT, (const void *)(uintptr_t)at);
+    } else {
+        at = ring_alloc(&s_iring, (GLsizeiptr)s_mg.n * 4, &dst);
+        if (dst)
+            memcpy(dst, s_mg.idx, s_mg.n * 4);
+        ring_done(&s_iring, at, (GLsizeiptr)s_mg.n * 4, dst, s_mg.idx);
+        p_glDrawElements(s_mg.mode, (GLsizei)s_mg.n, GL_UNSIGNED_INT, (const void *)(uintptr_t)at);
+    }
+    s_pf_calls++;
+    if (s_pf_on > 0) {
+        uint64_t dt = hz_now() - t0;
+        s_pf_ns[PF_DRAW] += dt;
+        s_pf_t += dt;                   /* not the caller's phase */
+    }
+}
+
 /* Which vertex attribute arrays are enabled in s_vao (only this file
  * touches it): enable and disable only on change. */
 static uint32_t s_attr_on;
@@ -3623,7 +3802,6 @@ static void attr_enable(uint32_t a, int on)
 /* The byte ranges the direct attributes of `b` span, merged where they
  * overlap (interleaved attributes share one), each from a 4-aligned start;
  * of_run[a] says which range attribute a is in. Returns the range count. */
-typedef struct { const uint8_t *lo, *hi; GLintptr at; } VRun;
 static uint32_t vertex_runs(const Nv2aRawBatch *b, VRun *run, int *of_run)
 {
     uint32_t nv = b->vertex_count, nrun = 0, a, i;
@@ -3678,6 +3856,7 @@ static uint32_t vertex_runs(const Nv2aRawBatch *b, VRun *run, int *of_run)
     return nrun;
 }
 
+static GLintptr s_upload_at;           /* where upload_vertices put the data */
 static int upload_vertices(const Nv2aRawBatch *b)
 {
     VRun run[NV2A_RAW_ATTRS];
@@ -3708,6 +3887,7 @@ static int upload_vertices(const Nv2aRawBatch *b)
         return 0;
 
     at = ring_alloc(&s_vring, bytes, &map);
+    s_upload_at = at;
     dst = (uint8_t *)map;
     if (!dst) {
         if ((size_t)bytes > staging_cap) {
@@ -4193,8 +4373,6 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
     pf_mark(PF_STATE);
 
     glBindVertexArray(s_vao);
-    if (!upload_vertices(b))
-        return;
     {
         /* The absent attributes read the title's SET_VERTEX_DATA* values
          * (Nv2aRawBatch.attr_const); set them only when those or the set of
@@ -4215,6 +4393,87 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
     mode = gl_prim(b, &idx, &n);
     if (!n)
         return;
+    {
+        /* Fold into the held draw, or hold this one (see merge_flush). */
+        GlMergeLayout L;
+        int ml;
+        /* MC3 draws mostly triangle strips (and some fans): converted to
+         * lists for merging only -- strip triangle i is (i, i+1, i+2), every
+         * other one with its first two swapped so it keeps its winding (and
+         * its culling); fan triangle i is (0, i+1, i+2). A draw that is not
+         * merged goes out as it came. */
+        static uint32_t *list;
+        static size_t list_cap;
+        const uint32_t *midx = idx;
+        uint32_t mn = n;
+        GLenum mmode = mode;
+        if ((mode == 0x0005 || mode == 0x0006) && n >= 3) {
+            size_t need = (size_t)(n - 2) * 3, t;
+            if (need > list_cap) {
+                free(list);
+                list_cap = need + 4096;
+                list = (uint32_t *)malloc(list_cap * 4);
+                if (!list) list_cap = 0;
+            }
+            if (list) {
+                for (t = 0; t + 2 < n; t++) {
+                    if (mode == 0x0006) {
+                        list[t * 3] = idx[0]; list[t * 3 + 1] = idx[t + 1]; list[t * 3 + 2] = idx[t + 2];
+                    } else if (t & 1) {
+                        list[t * 3] = idx[t + 1]; list[t * 3 + 1] = idx[t]; list[t * 3 + 2] = idx[t + 2];
+                    } else {
+                        list[t * 3] = idx[t]; list[t * 3 + 1] = idx[t + 1]; list[t * 3 + 2] = idx[t + 2];
+                    }
+                }
+                midx = list;
+                mn = (uint32_t)need;
+                mmode = GL_TRIANGLES;
+            }
+        }
+        if (s_merge_on < 0) {
+            const char *e = getenv("RECOMP_GL_MERGE");
+            s_merge_on = !(e && *e == '0');
+            fprintf(stderr, "  [GL] merging consecutive draws %s (RECOMP_GL_MERGE)\n",
+                    s_merge_on ? "on" : "off");
+        }
+        ml = s_merge_on && mmode == GL_TRIANGLES && !s_watch_hit && s_finish <= 0
+             && merge_layout(b, &L);
+        if (ml && s_mg_active && !s_draw_changed && s_mg.s == s && s_mg.ds == s->ds_on
+            && s_mg.mode == mmode && L.stride == s_mg.lay.stride
+            && !memcmp(L.sig, s_mg.lay.sig, sizeof L.sig)
+            && merge_append(b, midx, mn, &L)) {
+            pf_mark(PF_VTX);
+            if (s_pf_on > 0) {
+                s_pf_draws++;
+                s_pf_same++;
+                s_pf_verts += b->vertex_count;
+                s_pf_idx += n;
+            }
+            return;
+        }
+        merge_flush();
+        if (!upload_vertices(b))
+            return;
+        if (ml) {
+            s_mg.s = s;
+            s_mg.ds = s->ds_on;
+            s_mg.mode = mmode;
+            s_mg.vbase = s_upload_at;
+            s_mg.lay = L;
+            s_mg.n = 0;
+            s_mg.maxv = b->vertex_count;
+            if (merge_add_indices(midx, mn, 0)) {
+                s_mg_active = 1;
+                pf_mark(PF_VTX);
+                if (s_pf_on > 0) {
+                    s_pf_draws++;
+                    s_pf_verts += b->vertex_count;
+                    s_pf_idx += n;
+                }
+                return;
+            }
+        }
+    }
     {
         /* 16-bit indices whenever the batch's vertices allow: half the bytes
          * through the ring, and the GPU's native index size. */
@@ -4260,29 +4519,8 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
                     b->attr_present, b->xform, b->vp_start, pk.shader_program, pk.control,
                     r[0x1B00 / 4], (r[0x1B04 / 4] >> 8) & 0xFF);
         pf_mark(PF_VTX);
-        if (s_pf_on > 0) {
-            /* Same as the previous draw in everything but its vertices? */
-            static const GlSurf *last_s;
-            static GLuint last_ds;
-            static uint32_t last_frame = 0xFFFFFFFFu, last_sig[2 + 3 * NV2A_RAW_ATTRS];
-            static GLenum last_mode;
-            uint32_t sig[2 + 3 * NV2A_RAW_ATTRS];
-            memset(sig, 0, sizeof sig);
-            sig[0] = b->attr_present;
-            sig[1] = b->attr_direct;
-            for (a = 0; a < NV2A_RAW_ATTRS; a++)
-                if (b->attr_direct & (1u << a)) {
-                    sig[2 + 3 * a] = b->direct[a].type;
-                    sig[3 + 3 * a] = b->direct[a].size;
-                    sig[4 + 3 * a] = b->direct[a].stride;
-                }
-            if (!s_draw_changed && last_frame == s_frame && last_s == s && last_ds == s->ds_on
-                && last_mode == mode && !memcmp(sig, last_sig, sizeof sig))
-                s_pf_same++;
-            last_s = s; last_ds = s->ds_on; last_frame = s_frame; last_mode = mode;
-            memcpy(last_sig, sig, sizeof sig);
-        }
         glDrawElements(mode, (GLsizei)n, idx_type, (const void *)(uintptr_t)idx_at);
+        s_pf_calls++;
         pf_mark(PF_DRAW);
         if (s_pf_on > 0) {
             s_pf_draws++;
@@ -5016,6 +5254,7 @@ swap:
     gl_step_done("present");
     pf_start();
     SDL_GL_SwapWindow(s_win);
+    s_mg_fb_draw = s_mg_fb_read = 0xFFFFFFFFu;   /* whatever the swap did */
     pf_mark(PF_SWAP);
     if (s_pf_on > 0)
         s_pf_frames++;
@@ -5369,7 +5608,9 @@ static void *q_gl_thread(void *arg)
         uint32_t i;
 
         if (!avail) {
-            uint64_t t0 = q_now_ns();
+            uint64_t t0;
+            merge_flush();                      /* nothing follows: draw what is held */
+            t0 = q_now_ns();
             pthread_mutex_lock(&s_q_lock);
             __atomic_store_n(&s_q_consumer_waits, 1, __ATOMIC_SEQ_CST);
             while (__atomic_load_n(&s_q_head, __ATOMIC_SEQ_CST) == s_q_tail)
@@ -5444,9 +5685,11 @@ void nv2a_gl_prof_stats(double secs, char *out, size_t n)
         return;
     }
     k = (size_t)snprintf(out, n, "%u frames, per frame: %u draws (%u verts, %u indices), "
-                         "%u with new constants (%u rows), %u new uniforms, %u same as the one before; ms:",
+                         "%u with new constants (%u rows), %u new uniforms, %u same as the one before, "
+                         "%u draw calls (%u draws folded); ms:",
                          s_pf_frames, s_pf_draws / fr, s_pf_verts / fr, s_pf_idx / fr,
-                         s_pf_cdraws / fr, s_pf_crows / fr, s_pf_udraws / fr, s_pf_same / fr);
+                         s_pf_cdraws / fr, s_pf_crows / fr, s_pf_udraws / fr, s_pf_same / fr,
+                         s_pf_calls / fr, s_pf_folded / fr);
     for (i = 0; i < PF_N && k < n; i++)
         k += (size_t)snprintf(out + k, n - k, " %s %.1f", s_pf_name[i], s_pf_ns[i] / 1e6 / fr);
     {   /* the uniforms that changed most, per frame */
@@ -5467,7 +5710,7 @@ void nv2a_gl_prof_stats(double secs, char *out, size_t n)
     }
     memset(s_pf_ns, 0, sizeof s_pf_ns);
     s_pf_draws = s_pf_frames = s_pf_verts = s_pf_idx = 0;
-    s_pf_cdraws = s_pf_crows = s_pf_udraws = s_pf_same = 0;
+    s_pf_cdraws = s_pf_crows = s_pf_udraws = s_pf_same = s_pf_calls = s_pf_folded = 0;
 }
 
 void nv2a_gl_queue_stats(double secs, int *gl_idle_pct, int *exec_wait_pct)
