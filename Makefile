@@ -43,7 +43,7 @@ export VULKAN DEBUG GEN_DEBUGINFO JOBS SECS HEADLESS GDB LTO LTO_JOBS NO_GAME WI
 
 .PHONY: help setup nsp check-vm extract lift regen relift \
         xbe-edition build build-vk build-debug windows mac-app run run-gdb run-headless snapshot report hoststacks profile record difftest trap \
-        switch switch-vk glslang-switch switch-lto send \
+        switch switch-vk switch-lto send \
         hd-dump hd-tools hd-upscale import-save save-sync-up save-sync-down \
         seeds lift-report log du clean-build clean-gen clean toolkit-test
 
@@ -182,12 +182,8 @@ nsp:  ## NSP forwarders (home-menu apps; locally only), one per edition, from co
 	set -o pipefail; bash switch/nsp.sh prepare 2>&1 | tee $(LOGS)/nsp_$(NOW).log
 	set -o pipefail; bash switch/$(if $(filter 1,$(NATIVE)),nsp.sh,docker_build.sh switch/nsp.sh) 2>&1 | tee -a $(LOGS)/nsp_$(NOW).log
 
-switch-vk:  ## Switch build with Vulkan (NVK), in the NVK image (switch/devkitpro-nvk-image); once first: make glslang-switch
+switch-vk:  ## Switch build with Vulkan (NVK)
 	$(MAKE) switch VULKAN=1
-
-glslang-switch:  ## glslang for the Switch, once, for switch-vk (into work-dub/deps/glslang-switch)
-	@mkdir -p $(LOGS)
-	set -o pipefail; bash switch/build_glslang.sh 2>&1 | tee $(LOGS)/glslang_$(NOW).log
 
 switch-lto:  ## Switch build with link-time optimisation
 	$(MAKE) switch LTO=1

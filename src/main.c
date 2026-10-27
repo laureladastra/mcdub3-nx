@@ -396,12 +396,9 @@ static void *perf_thread(void *arg)
                 fprintf(stderr, "[perf] GL thread idle %d%%, executor held back by it %d%%\n",
                         idle, held);
             {   /* where the GL thread's time goes, per phase of a draw */
-                extern void nv2a_gl_prof_stats(double secs, char *out, size_t n)
-                    __attribute__((weak));                /* GL renderer only */
+                extern void nv2a_gl_prof_stats(double secs, char *out, size_t n);
                 char gl[480];
-                gl[0] = 0;
-                if (nv2a_gl_prof_stats)
-                    nv2a_gl_prof_stats(secs, gl, sizeof gl);
+                nv2a_gl_prof_stats(secs, gl, sizeof gl);
                 if (gl[0])
                     fprintf(stderr, "[perf] GL %s\n", gl);
             }

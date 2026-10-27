@@ -627,18 +627,7 @@ the same path and runs `switch/build.sh` as your user.
 To move to a newer devkitPro: put the new tag and its index digest in
 `switch/devkitpro-image`, build, test, commit. `NATIVE=1` uses a devkitPro
 installed on the host instead (`DEVKITPRO`, default `/opt/devkitpro`).
-**Vulkan build (experimental).** `make switch-vk` builds the Vulkan
-renderer (`nv2a_vk`) instead of OpenGL, as `<sd folder>-<edition>-vulkan.nro`,
-in its own image, `switch/devkitpro-nvk-image`: devkitA64 with Mesa 26 for
-Horizon, whose NVK (`portlibs/switch/lib/libvulkan.a`) the NRO links
-statically, with SDL2 and FFmpeg as in devkitPro's. glslang (shaders are
-compiled at run time) is not in it: `make glslang-switch` builds it once
-into `work-dub/deps/glslang-switch`. Test on the console only: Eden cannot
-run NVK (its GPU work never completes there, as nfsu2-sw found). The Vulkan
-renderer lacks the fixes the OpenGL one has had since 2026-10-15 (the 2D
-blit, depth for the motion blur, the 16:9 fill, FXAA, UI upscaling, the
-texture and streaming speed-ups): a first run shows whether NVK runs the
-game and how fast, not a finished picture.
+`VULKAN=1` still needs the NVK SDK in `work-<game>/deps` (not in the image).
 
 ## Sending builds to the Switch
 

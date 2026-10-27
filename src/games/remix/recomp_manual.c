@@ -1065,12 +1065,11 @@ void sub_0041B550(void)
  * program list before the first logo: 4.8 s of black (2026-10-18). Now it
  * waits for this and compiles a program a frame behind a static screen
  * (nv2a_gl_prewarm_start; RECOMP_PROG_PREWARM=boot for the old way). */
-extern void nv2a_gl_prewarm_start(void) __attribute__((weak));   /* GL only */
+extern void nv2a_gl_prewarm_start(void);
 extern void sub_0001BC10_gen(void);
 void sub_0001BC10(void)
 {
-    if (nv2a_gl_prewarm_start)
-        nv2a_gl_prewarm_start();
+    nv2a_gl_prewarm_start();
     sub_0001BC10_gen();
 }
 
