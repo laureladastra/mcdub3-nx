@@ -26,5 +26,5 @@
     X("RECOMP_GL_PERDRAW", "0") \
     X("RECOMP_GL_MERGE_KB", "256") \
     X("RECOMP_GL_CUBO", "1")          /* constants through a uniform buffer */ \
-    X("RECOMP_GL_LEAN", "1")          /* base-vertex draws, changed uniforms only */ \
+    X("RECOMP_GL_LEAN", "1")          /* uniforms sent as they change (base-vertex draws: no, GPU +10 ms) */ \
     X("RECOMP_GL_SHARPEN", "0")       /* no CAS: part of the present pass's ~2.7 ms of GPU */
