@@ -4271,22 +4271,24 @@ static void merge_flush(void)
  * touches it): enable and disable only on change. */
 static uint32_t s_attr_on;
 
-/* RECOMP_GL_LEAN=1: fewer GL calls per draw (off by default; a title turns
- * it on in its own defaults). On the Switch's Mesa each call has a price:
- *   - interleaved vertices go into the streaming buffer at a whole multiple
- *     of their stride and are drawn with a base vertex, so the attribute
- *     pointers stay put and are set only when the layout changes -- not up
- *     to 16 glVertexAttribPointer calls a draw, each re-validating the
- *     vertex setup;
- *   - a program's uniforms go up one by one as they change, not all ~19
- *     whenever any of them does. */
+/* RECOMP_GL_LEAN=1: a program's uniforms go up one by one as they change,
+ * not all ~19 whenever any of them does (off by default; a title turns it on
+ * in its own defaults).
+ *
+ * RECOMP_GL_BASEVERTEX=1 (off): interleaved vertices placed at a multiple of
+ * their stride and drawn with glDrawElementsBaseVertex, so the attribute
+ * pointers are set only when the layout changes. Measured on the Switch
+ * (Remix rain race, 2026-10-28): the GPU went from 22.8 to 32.6 ms a frame
+ * and streaming-buffer waits of up to 47 ms appeared -- nouveau seems to
+ * lose the draw's vertex range with a base vertex and fetch or copy far
+ * more. Kept for other drivers to try. */
 static int s_lean = -1;
 static int lean_on(void)
 {
     if (s_lean < 0) {
         const char *e = getenv("RECOMP_GL_LEAN");
-        s_lean = e && e[0] == '1' && glDrawElementsBaseVertex;
-        fprintf(stderr, "  [GL] lean draws %s (RECOMP_GL_LEAN)\n", s_lean ? "on" : "off");
+        s_lean = e && e[0] == '1';
+        fprintf(stderr, "  [GL] uniforms sent as they change: %s (RECOMP_GL_LEAN)\n", s_lean ? "on" : "off");
     }
     return s_lean;
 }
@@ -4296,6 +4298,17 @@ static int lean_on(void)
 static struct { GLint size; GLenum type; GLboolean norm; GLsizei stride; GLintptr off; } s_vptr[NV2A_RAW_ATTRS];
 static uint32_t s_vptr_valid;               /* bit per attribute */
 static GLint s_base_vertex = -1;            /* upload_vertices: base vertex, or -1 */
+static int bv_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("RECOMP_GL_BASEVERTEX");
+        on = e && e[0] == '1' && glDrawElementsBaseVertex;
+        if (on)
+            fprintf(stderr, "  [GL] base-vertex draws on (RECOMP_GL_BASEVERTEX)\n");
+    }
+    return on;
+}
 static void attr_enable(uint32_t a, int on)
 {
     uint32_t bit = 1u << a;
@@ -4390,7 +4403,7 @@ static int upload_vertices(const Nv2aRawBatch *b)
         return 0;
     nrun = vertex_runs(b, run, of_run);
     s_base_vertex = -1;
-    if (nrun == 1 && !conv && lean_on()) {
+    if (nrun == 1 && !conv && bv_on()) {
         /* One interleaved range with one stride: placed at a multiple of the
          * stride, pointers relative to the buffer's start (see lean_on). */
         uint32_t S = 0;
