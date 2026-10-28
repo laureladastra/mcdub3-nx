@@ -214,11 +214,17 @@ X(GLboolean, glUnmapBuffer, (GLenum)) \
     X(GLenum, glClientWaitSync, (GLsync, GLbitfield, GLuint64)) \
     X(void, glDeleteSync, (GLsync)) \
     X(void, glGenQueries, (GLsizei, GLuint *)) \
+    X(GLuint, glGetUniformBlockIndex, (GLuint, const GLchar *)) \
+    X(void, glUniformBlockBinding, (GLuint, GLuint, GLuint)) \
+    X(void, glBindBufferRange, (GLenum, GLuint, GLuint, GLintptr, GLsizeiptr)) \
     X(void, glBeginQuery, (GLenum, GLuint)) \
     X(void, glEndQuery, (GLenum)) \
     X(void, glGetQueryObjectiv, (GLuint, GLenum, GLint *)) \
     X(void, glGetQueryObjectui64v, (GLuint, GLenum, GLuint64 *))
 #define GL_TIME_ELAPSED                   0x88BF
+#define GL_UNIFORM_BUFFER                 0x8A11
+#define GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT 0x8A34
+#define GL_INVALID_INDEX                  0xFFFFFFFFu
 #define GL_QUERY_RESULT                   0x8866
 #define GL_QUERY_RESULT_AVAILABLE         0x8867
 #define GL_TEXTURE_BASE_LEVEL             0x813C
@@ -333,6 +339,9 @@ int nv2a_gl_load(void *(*getproc)(const char *name));
 #define glClientWaitSync         p_glClientWaitSync
 #define glDeleteSync             p_glDeleteSync
 #define glGenQueries             p_glGenQueries
+#define glGetUniformBlockIndex   p_glGetUniformBlockIndex
+#define glUniformBlockBinding    p_glUniformBlockBinding
+#define glBindBufferRange        p_glBindBufferRange
 #define glBeginQuery             p_glBeginQuery
 #define glEndQuery               p_glEndQuery
 #define glGetQueryObjectiv       p_glGetQueryObjectiv

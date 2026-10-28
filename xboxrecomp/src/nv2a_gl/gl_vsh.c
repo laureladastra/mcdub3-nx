@@ -393,21 +393,59 @@ static char *strip_perdraw(const char *src)
     return o;
 }
 
+/* RECOMP_GL_CUBO=1: the transform constants in a uniform block (nv2a_gl.c
+ * streams them through a buffer and binds a range), not a uniform array that
+ * the driver copies whole into its command stream at each change. */
+static char *with_cubo(const char *src)
+{
+    static const char from[] = "uniform vec4 c[192];\n";
+    static const char to[] = "layout(std140) uniform VsConst { vec4 c[192]; };\n";
+    const char *at = strstr(src, from);
+    size_t a = strlen(from), b = strlen(to), n = strlen(src);
+    char *o;
+    if (!at || !(o = (char *)malloc(n - a + b + 1)))
+        return NULL;
+    memcpy(o, src, (size_t)(at - src));
+    memcpy(o + (at - src), to, b);
+    memcpy(o + (at - src) + b, at + a, n - (size_t)(at - src) - a + 1);
+    return o;
+}
+
+/* Asked for (RECOMP_GL_CUBO=1) and possible: the renderer says so at start
+ * (nv2a_gl_vsh_cubo_set), before the first program is built. */
+static int s_cubo = -1;
+void nv2a_gl_vsh_cubo_set(int ok)
+{
+    const char *e = getenv("RECOMP_GL_CUBO");
+    s_cubo = ok && e && e[0] == '1';
+}
+int nv2a_gl_vsh_cubo(void)
+{
+    return s_cubo > 0;
+}
+
 const char *nv2a_gl_vsh_prelude(void)
 {
     static int perdraw = -1;
-    static char *plain;
+    static char *prelude;
     if (nv2a_shader_vk)
         return s_vk_prelude;
     if (perdraw < 0) {
         const char *e = getenv("RECOMP_GL_PERDRAW");
+        const char *p = gl_prelude();
+        char *t;
         perdraw = !(e && e[0] == '0');
-        if (!perdraw) {
-            plain = strip_perdraw(gl_prelude());
+        if (!perdraw && (t = strip_perdraw(p)) != NULL) {
+            p = t;
             fprintf(stderr, "  [GL] per-draw matrices off (RECOMP_GL_PERDRAW=0)\n");
         }
+        if (nv2a_gl_vsh_cubo() && (t = with_cubo(p)) != NULL) {
+            p = t;
+            fprintf(stderr, "  [GL] transform constants in a uniform buffer (RECOMP_GL_CUBO=1)\n");
+        }
+        prelude = (char *)p;
     }
-    return !perdraw && plain ? plain : gl_prelude();
+    return prelude ? prelude : gl_prelude();
 }
 
 static const char *gl_prelude(void)

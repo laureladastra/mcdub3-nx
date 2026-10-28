@@ -142,6 +142,17 @@ typedef struct {
 } GlRing;
 static GlRing s_vring = { 0, GL_ARRAY_BUFFER, 16 << 20, 0 };
 static GlRing s_iring = { 0, GL_ELEMENT_ARRAY_BUFFER, 4 << 20, 0 };
+/* Transform constants in a uniform buffer (RECOMP_GL_CUBO=1, gl_vsh.c): a
+ * uniform array's change makes Mesa copy the program's whole block (3 KB
+ * for c[192]) into its command stream, ~270 times a Remix rain frame on the
+ * Switch. Streamed here instead, one range bound at binding 1 by every
+ * program, re-sent only when the executor's constants change. */
+static GlRing s_uring = { 0, GL_UNIFORM_BUFFER, 4 << 20, 0 };
+static int s_cubo_on;
+static GLint s_ubo_align = 256;
+static int s_cubo_valid;
+static uint32_t s_cubo_gen;
+static float s_cubo_last[192][4];           /* what the bound range holds */
 static int ring_persist(GlRing *g);
 static const uint32_t *s_regs;          /* the executor's method shadow */
 /* Hitch accounting (gl_flip logs frames over 50 ms): per frame, programs
@@ -2246,6 +2257,7 @@ typedef struct {
     int        vpc_valid;       /* vpc holds what this program's "c" was given */
     uint32_t   vpc_gen;         /* ... as of the executor's constant version */
     int        vpc_rows;        /* c[i]'s location is u_c + i: rows can go alone */
+    int        cubo;            /* c[] in the VsConst block (s_uring) */
     uint32_t   hash;            /* bucket of (vkey, pkey) */
     int        next;            /* chain in s_prog_head, index + 1 */
     float      vpc[192][4];
@@ -2883,6 +2895,14 @@ static GlProg *prog_register(uint64_t vkey, const Nv2aPshKey *pk, GLuint prog)
                 && (glGetUniformLocation(p->prog, "u_mv") < 0
                     || arr_active(p->prog, "u_mv", MG_DRAWS * 4) == MG_DRAWS * 4);
     p->vpc_rows = p->u_c >= 0 && glGetUniformLocation(p->prog, "c[191]") == p->u_c + 191;
+    p->cubo = 0;
+    if (s_cubo_on) {
+        GLuint bi = glGetUniformBlockIndex(p->prog, "VsConst");
+        if (bi != GL_INVALID_INDEX) {
+            glUniformBlockBinding(p->prog, bi, 1);
+            p->cubo = 1;
+        }
+    }
     p->u_surf = glGetUniformLocation(p->prog, "u_surf");
     p->u_snapy = glGetUniformLocation(p->prog, "u_snapy");
     p->u_aa = glGetUniformLocation(p->prog, "u_aa");
@@ -3269,6 +3289,24 @@ static int ready(void)
     if (!ring_persist(&s_iring)) {
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, s_ibo);
         glBufferData(GL_ELEMENT_ARRAY_BUFFER, s_iring.cap, NULL, GL_STREAM_DRAW);
+    }
+    {
+        const char *e = getenv("RECOMP_GL_CUBO");
+        if (e && e[0] == '1' && glGetUniformBlockIndex && glUniformBlockBinding
+            && glBindBufferRange) {
+            glGenBuffers(1, &s_uring.buf);
+            if (!ring_persist(&s_uring)) {
+                glBindBuffer(GL_UNIFORM_BUFFER, s_uring.buf);
+                glBufferData(GL_UNIFORM_BUFFER, s_uring.cap, NULL, GL_STREAM_DRAW);
+            }
+            s_cubo_on = 1;
+            glGetIntegerv(GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT, &s_ubo_align);
+            if (s_ubo_align < 16 || (s_ubo_align & (s_ubo_align - 1)))
+                s_ubo_align = 256;
+        }
+        nv2a_gl_vsh_cubo_set(s_cubo_on);
+        if (e && e[0] == '1' && !s_cubo_on)
+            fprintf(stderr, "  [GL] RECOMP_GL_CUBO=1: no uniform buffers here, constants as uniforms\n");
     }
     s_state = 1;
     prog_cache_prewarm();
@@ -4479,6 +4517,33 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
     aa[1] = b->aa_sy > 0 ? b->aa_sy : 1.0f;
     memcpy(m, b->composite, sizeof m);
 
+    if (p->cubo && !(s_cubo_valid && s_cubo_gen == b->vp_const_gen)
+        && s_cubo_valid && !memcmp(s_cubo_last, b->vp_consts, sizeof s_cubo_last)) {
+        s_cubo_gen = b->vp_const_gen;       /* a new version, the same values */
+    }
+    if (p->cubo && !(s_cubo_valid && s_cubo_gen == b->vp_const_gen)) {
+        /* Constants in the uniform buffer: a new copy, its range bound. */
+        GLintptr at, aoff;
+        void *ptr = NULL;
+        GLsizeiptr sz = (GLsizeiptr)sizeof(float) * 4 * 192;
+        memcpy(s_cubo_last, b->vp_consts, sizeof s_cubo_last);
+        if (s_mg_active)
+            merge_flush();                  /* the held draw keeps the old range */
+        at = ring_alloc(&s_uring, sz + s_ubo_align, &ptr);
+        aoff = (at + s_ubo_align - 1) & ~(GLintptr)(s_ubo_align - 1);
+        if (ptr) {
+            memcpy((uint8_t *)ptr + (aoff - at), b->vp_consts, (size_t)sz);
+            ring_done(&s_uring, at, sz + s_ubo_align, ptr, NULL);   /* unmaps if not persistent */
+        } else {
+            ring_done(&s_uring, aoff, sz, NULL, b->vp_consts);      /* glBufferSubData */
+        }
+        glBindBufferRange(GL_UNIFORM_BUFFER, 1, s_uring.buf, aoff, sz);
+        s_cubo_valid = 1;
+        s_cubo_gen = b->vp_const_gen;
+        s_pf_cdraws++;
+        s_pf_crows += 192;
+        s_draw_changed |= DC_CONST;
+    }
     /* 192 constants are 3 KB, and most draws in a row share them: upload
      * only when they changed since this program last got them. */
     if (p->u_c >= 0 && !(p->vpc_valid && p->vpc_gen == b->vp_const_gen)) {

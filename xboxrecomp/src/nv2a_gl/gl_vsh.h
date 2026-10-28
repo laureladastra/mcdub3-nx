@@ -15,6 +15,8 @@ extern int nv2a_shader_vk;
 
 /* Declarations and helpers every vertex shader starts with. */
 const char *nv2a_gl_vsh_prelude(void);
+int nv2a_gl_vsh_cubo(void);             /* constants in a uniform block (RECOMP_GL_CUBO) */
+void nv2a_gl_vsh_cubo_set(int ok);      /* the renderer can stream them (at start) */
 /* main() for a vertex-program shader (follows the program body). */
 const char *nv2a_gl_vsh_main_program(void);
 /* main() for fixed-function / pre-transformed batches (no program body). */
