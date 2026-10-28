@@ -6290,12 +6290,24 @@ static void q_flip(void)
     size_t size;
     uint8_t *rec;
 
-    /* No more than two frames behind the executor. */
-    if (__atomic_load_n(&s_q_flips, __ATOMIC_ACQUIRE) >= 2) {
+    /* No more than RECOMP_GL_QUEUE_FRAMES (2) frames behind the executor:
+     * each queued frame is a frame of input delay. 1 keeps the title at
+     * most one frame ahead of the GL thread -- for a title the GL thread no
+     * longer holds back (the Remix, 2026-10-28: idle 11%, and the steering
+     * felt late). */
+    static int max_flips = -1;
+    if (max_flips < 0) {
+        const char *e = getenv("RECOMP_GL_QUEUE_FRAMES");
+        max_flips = e && atoi(e) >= 1 ? atoi(e) : 2;
+        if (max_flips != 2)
+            fprintf(stderr, "  [GL] at most %d frame(s) queued for the GL thread (RECOMP_GL_QUEUE_FRAMES)\n",
+                    max_flips);
+    }
+    if (__atomic_load_n(&s_q_flips, __ATOMIC_ACQUIRE) >= max_flips) {
         uint64_t t0 = q_now_ns();
         pthread_mutex_lock(&s_q_lock);
         s_q_producer_waits = 1;
-        while (__atomic_load_n(&s_q_flips, __ATOMIC_ACQUIRE) >= 2)
+        while (__atomic_load_n(&s_q_flips, __ATOMIC_ACQUIRE) >= max_flips)
             q_timed_wait();
         s_q_producer_waits = 0;
         pthread_mutex_unlock(&s_q_lock);
