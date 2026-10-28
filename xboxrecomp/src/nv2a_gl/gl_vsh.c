@@ -24,6 +24,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 typedef struct {
@@ -358,10 +359,59 @@ static const char s_vk_prelude[] =
 
 int nv2a_shader_vk;
 
+static const char *gl_prelude(void);
+
+/* RECOMP_GL_PERDRAW=0: the prelude without per-draw matrices -- one set,
+ * read at constant indices, as before 2026-10-27 (nv2a_gl.c then never
+ * folds a draw by its matrices: u_m has 4 rows). To measure what the
+ * per-vertex draw lookup costs a GPU-bound title. */
+static char *strip_perdraw(const char *src)
+{
+    static const char *const cut[][2] = {
+        { "uniform vec4 u_m[4 * 16];", "uniform vec4 u_m[4];" },
+        { "uniform vec4 u_mv[4 * 16];", "uniform vec4 u_mv[4];" },
+        { "uniform int u_dend[16];\n", "" },
+        { "int nv2a_draw_index() {\n"
+          "    int i = 0;\n"
+          "    while (i < 15 && gl_VertexID >= u_dend[i]) i++;\n"
+          "    return i * 4;\n"
+          "}\n", "int nv2a_draw_index() { return 0; }\n" },
+    };
+    size_t k, len = strlen(src) + 1;
+    char *o = (char *)malloc(len);
+    if (!o)
+        return NULL;
+    memcpy(o, src, len);
+    for (k = 0; k < sizeof cut / sizeof cut[0]; k++) {
+        char *at = strstr(o, cut[k][0]);
+        size_t a = strlen(cut[k][0]), b = strlen(cut[k][1]);
+        if (!at)
+            continue;
+        memmove(at + b, at + a, strlen(at + a) + 1);
+        memcpy(at, cut[k][1], b);
+    }
+    return o;
+}
+
 const char *nv2a_gl_vsh_prelude(void)
 {
+    static int perdraw = -1;
+    static char *plain;
     if (nv2a_shader_vk)
         return s_vk_prelude;
+    if (perdraw < 0) {
+        const char *e = getenv("RECOMP_GL_PERDRAW");
+        perdraw = !(e && e[0] == '0');
+        if (!perdraw) {
+            plain = strip_perdraw(gl_prelude());
+            fprintf(stderr, "  [GL] per-draw matrices off (RECOMP_GL_PERDRAW=0)\n");
+        }
+    }
+    return !perdraw && plain ? plain : gl_prelude();
+}
+
+static const char *gl_prelude(void)
+{
     return
         "#version 330 core\n"
         "layout(location = 0) in vec4 v0;\n"
