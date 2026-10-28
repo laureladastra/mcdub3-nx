@@ -2736,7 +2736,7 @@ static void cs_note(double vs, double fs, double link, const char *const *vsrc, 
     s_cs_slow[k].fs = cs_join(&fsrc, 1);
 }
 
-/* Print the averages and write the slowest sources (once, after the list). */
+/* Print the averages and, on request, write the slowest sources (once, after the list). */
 static void cs_report(const char *list_path)
 {
     char path[600];
@@ -2746,6 +2746,13 @@ static void cs_report(const char *list_path)
         return;
     fprintf(stderr, "  [GL] compile time per program (avg of %u): vertex %.1f ms, fragment %.1f ms,"
             " link %.1f ms\n", s_cs_n, s_cs_vs / s_cs_n, s_cs_fs / s_cs_n, s_cs_link / s_cs_n);
+    {   /* RECOMP_GL_SLOW_DUMP=1: also the three slowest programs' sources,
+         * beside the list -- for work on compile time; off by default (six
+         * files written at every start, read by nobody). */
+        const char *e = getenv("RECOMP_GL_SLOW_DUMP");
+        if (!(e && e[0] == '1'))
+            return;
+    }
     n = strlen(list_path);
     if (n > 4 && !strcmp(list_path + n - 4, ".bin"))
         n -= 4;
