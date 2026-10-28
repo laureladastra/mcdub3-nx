@@ -643,6 +643,10 @@ static void set_runtime_defaults(void)
 #ifdef __SWITCH__
     setenv("RECOMP_QUIET", "1", 0);            /* every log line costs an SD write */
 #endif
+    /* The game's own (config/<game>/game.h). */
+#define MC3_DEFAULT(name, value) setenv(name, value, 0);
+    MC3_GAME_DEFAULTS(MC3_DEFAULT)
+#undef MC3_DEFAULT
 }
 
 /* Every MC3_* / RECOMP_* setting in effect, defaults included, so a log

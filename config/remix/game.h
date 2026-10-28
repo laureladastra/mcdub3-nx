@@ -8,3 +8,11 @@
 #define MC3_ADDR_FRAME_TIME  0x004B2D70u   /* the game's frame time: 1 of 1 */
 #define MC3_CODE_LO          0x00011000u   /* .text .. XPP (ends 0x004476C8) */
 #define MC3_CODE_HI          0x00448000u
+
+/* Settings this game starts with unless mcdub3remix_env.txt (or the
+ * environment) says otherwise (src/main.c, set_runtime_defaults).
+ * RECOMP_GL_MERGE=0: merging draws gave the Remix's rain races a frame over
+ * 80 ms about every second (1.2/s, against 0.2/s without; Switch,
+ * 2026-10-28) -- the stutter -- where the DUB Edition gains from it. */
+#define MC3_GAME_DEFAULTS(X) \
+    X("RECOMP_GL_MERGE", "0")
