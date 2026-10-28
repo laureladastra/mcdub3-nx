@@ -17,8 +17,12 @@
  *   merging, per-draw matrices off        975 calls x 20 us -- the cheapest
  * The Remix changes matrices often; each merged call with several matrix
  * sets uploads two 64-row uniform arrays, and Mesa resends the program's
- * whole uniform block for each. The DUB Edition keeps both on. */
+ * whole uniform block for each. The DUB Edition keeps both on.
+ * RECOMP_GL_CUBO=1: the vertex programs' 192 constants streamed through a
+ * uniform buffer and bound by range -- not copied, 3 KB at a time, into the
+ * driver's command stream at each of ~270 changes a rain frame. */
 #define MC3_GAME_DEFAULTS(X) \
     X("RECOMP_GL_MERGE", "1") \
     X("RECOMP_GL_PERDRAW", "0") \
-    X("RECOMP_GL_MERGE_KB", "256")
+    X("RECOMP_GL_MERGE_KB", "256") \
+    X("RECOMP_GL_CUBO", "1")          /* constants through a uniform buffer */
