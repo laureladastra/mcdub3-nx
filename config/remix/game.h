@@ -15,4 +15,5 @@
  * 80 ms about every second (1.2/s, against 0.2/s without; Switch,
  * 2026-10-28) -- the stutter -- where the DUB Edition gains from it. */
 #define MC3_GAME_DEFAULTS(X) \
-    X("RECOMP_GL_MERGE", "0")
+    X("RECOMP_GL_MERGE", "0") \
+    X("RECOMP_GL_MERGE_KB", "256")   /* when merging is turned on: batches capped */
