@@ -3520,12 +3520,23 @@ static uint32_t zmax_of(const uint32_t *r)
  * (10.5 ms of a 55 ms race frame, 2026-10-26). The buffer is used in
  * quarters: leaving one fences it, entering one waits for its fence, so
  * nothing the GPU may still read is written over. */
+/* Time the GL thread spent waiting for the GPU to finish with a quarter of
+ * a streaming buffer before refilling it (MC3_PERF: "[perf] GL waits"). */
+static uint64_t s_rw_ns, s_rw_max_ns;
+static uint32_t s_rw_n;
 static void ring_enter(GlRing *g, int s)
 {
     if (g->fence[g->seg] == NULL)
         g->fence[g->seg] = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
     if (g->fence[s]) {
+        uint64_t t0 = hz_now(), dt;
         glClientWaitSync(g->fence[s], GL_SYNC_FLUSH_COMMANDS_BIT, 1000000000ull);
+        dt = hz_now() - t0;
+        if (dt > 200000) {                  /* over 0.2 ms: a real wait */
+            s_rw_n++;
+            s_rw_ns += dt;
+            if (dt > s_rw_max_ns) s_rw_max_ns = dt;
+        }
         glDeleteSync(g->fence[s]);
         g->fence[s] = NULL;
     }
@@ -3726,6 +3737,26 @@ static struct {
 static struct { uint8_t *p; size_t len, cap; } s_stg[MG_STREAMS];
 #define MG_STAGE_MAX (3u << 20)             /* below a ring quarter (ring_alloc) */
 static int s_merge_on = -1;
+/* A merged call's vertices and indices, at most (RECOMP_GL_MERGE_KB; 0, the
+ * default, = no cap but the staging limit): past that the held call goes
+ * out and a new one starts. Remix rain races (2026-10-28): with merging, a
+ * frame over 80 ms about every second; batches of up to 3 MB, uploaded in
+ * one piece at the flush, are the suspect. A title sets it in its own
+ * defaults. */
+static uint32_t s_merge_cap = 0xFFFFFFFFu;
+static uint32_t s_merge_capped;             /* calls cut by it (perf report) */
+static void merge_cap_init(void)
+{
+    static int done;
+    const char *e;
+    if (done)
+        return;
+    done = 1;
+    e = getenv("RECOMP_GL_MERGE_KB");
+    s_merge_cap = (uint32_t)(e ? atoi(e) : 0) * 1024u;
+    if (!s_merge_cap)
+        s_merge_cap = 0xFFFFFFFFu;
+}
 
 /* Why the draws that did not fold did not (MC3_PERF): not mergeable (layout
  * or primitive), nothing held / another surface or layout, or -- the held
@@ -3823,6 +3854,10 @@ static int merge_append(const Nv2aRawBatch *b, const uint32_t *idx, uint32_t n,
     k = (uint32_t)(rel / (GLintptr)L->stride);
     if ((uint64_t)k + b->vertex_count > 0x7FFFFFFFu)
         return 0;
+    if ((uint64_t)rel + (uint64_t)L->bytes + (uint64_t)(s_mg.n + n) * 4 > s_merge_cap) {
+        s_merge_capped++;
+        return 0;
+    }
     if (!ring_alloc_exact(&s_vring, at, L->bytes, &ptr))
         return 0;
     if (ptr)
@@ -3993,6 +4028,10 @@ static int stage_append(const Nv2aRawBatch *b, const GlStageLayout *L, const VRu
     }
     if (total > MG_STAGE_MAX)
         return 0;
+    if (s_mg.n && total + (uint64_t)(s_mg.n + n) * 4 > s_merge_cap) {
+        s_merge_capped++;
+        return 0;
+    }
     for (st = 0; st < L->nst; st++) {
         size_t at = (size_t)k * L->stride[st];
         size_t bytes = L->kind[st] == MG_RANGE ? (size_t)(run[st].hi - run[st].lo)
@@ -4866,6 +4905,7 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
         if (s_merge_on < 0) {
             const char *e = getenv("RECOMP_GL_MERGE");
             s_merge_on = e && *e == '0' ? 0 : e && *e == '2' ? 2 : 1;
+            merge_cap_init();
             fprintf(stderr, "  [GL] merging consecutive draws %s (RECOMP_GL_MERGE)\n",
                     s_merge_on == 2 ? "on, interleaved vertices only" : s_merge_on ? "on" : "off");
         }
@@ -6395,6 +6435,12 @@ void nv2a_gl_prof_stats(double secs, char *out, size_t n)
             s_census[best].n = 0;
         }
         gq_report();
+        fprintf(stderr, "[perf] GL waits per frame: streaming buffer %.1f ms (%u waits, worst %.1f ms);"
+                " merged calls cut at %u KB: %u\n", s_rw_ns / 1e6 / fr, s_rw_n,
+                s_rw_max_ns / 1e6, s_merge_cap == 0xFFFFFFFFu ? 0 : s_merge_cap / 1024,
+                s_merge_capped / fr);
+        s_rw_ns = s_rw_max_ns = 0;
+        s_rw_n = s_merge_capped = 0;
         fprintf(stderr, "%s rest %u; folded with own matrices %u (in %u calls)\n", line,
                 s_census_other / fr, s_pf_permat / fr, s_pf_permat_calls / fr);
         s_pf_permat = s_pf_permat_calls = 0;
