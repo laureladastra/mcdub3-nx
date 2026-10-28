@@ -3771,6 +3771,7 @@ static struct {
     GLint dend[MG_DRAWS];
     float pm[MG_DRAWS][16], pmv[MG_DRAWS][16];
     uint32_t last_end;                      /* the folded draw's last index + 1 */
+    GLint bv;                               /* base vertex (lean draws), or -1 */
 } s_mg;
 static struct { uint8_t *p; size_t len, cap; } s_stg[MG_STREAMS];
 #define MG_STAGE_MAX (3u << 20)             /* below a ring quarter (ring_alloc) */
@@ -4135,6 +4136,7 @@ static void merge_note_first(GlProg *p, uint32_t nv)
 }
 
 /* The staged streams into the ring, and the attributes pointed at them. */
+static uint32_t s_vptr_valid;
 static void stage_upload(void)
 {
     const GlStageLayout *L = &s_mg.slay;
@@ -4145,6 +4147,7 @@ static void stage_upload(void)
     uint8_t *dst;
     static uint8_t *flat;
     static size_t flat_cap;
+    s_vptr_valid = 0;                       /* absolute pointers from here */
     for (st = 0; st < L->nst; st++) {
         so[st] = bytes;
         bytes += ((GLsizeiptr)s_stg[st].len + 63) & ~(GLsizeiptr)63;
@@ -4232,13 +4235,21 @@ static void merge_flush(void)
         for (i = 0; i < s_mg.n; i++)
             o[i] = (uint16_t)s_mg.idx[i];
         ring_done(&s_iring, at, (GLsizeiptr)s_mg.n * 2, dst, tmp);
-        p_glDrawElements(s_mg.mode, (GLsizei)s_mg.n, GL_UNSIGNED_SHORT, (const void *)(uintptr_t)at);
+        if (s_mg.bv >= 0 && !s_mg.staged)
+            p_glDrawElementsBaseVertex(s_mg.mode, (GLsizei)s_mg.n, GL_UNSIGNED_SHORT,
+                                       (const void *)(uintptr_t)at, s_mg.bv);
+        else
+            p_glDrawElements(s_mg.mode, (GLsizei)s_mg.n, GL_UNSIGNED_SHORT, (const void *)(uintptr_t)at);
     } else {
         at = ring_alloc(&s_iring, (GLsizeiptr)s_mg.n * 4, &dst);
         if (dst)
             memcpy(dst, s_mg.idx, s_mg.n * 4);
         ring_done(&s_iring, at, (GLsizeiptr)s_mg.n * 4, dst, s_mg.idx);
-        p_glDrawElements(s_mg.mode, (GLsizei)s_mg.n, GL_UNSIGNED_INT, (const void *)(uintptr_t)at);
+        if (s_mg.bv >= 0 && !s_mg.staged)
+            p_glDrawElementsBaseVertex(s_mg.mode, (GLsizei)s_mg.n, GL_UNSIGNED_INT,
+                                       (const void *)(uintptr_t)at, s_mg.bv);
+        else
+            p_glDrawElements(s_mg.mode, (GLsizei)s_mg.n, GL_UNSIGNED_INT, (const void *)(uintptr_t)at);
     }
     if (pd || (mp && s_mg.defer)) {     /* back to one set: the program's latest */
         if (mp->u_m >= 0)
@@ -4259,6 +4270,32 @@ static void merge_flush(void)
 /* Which vertex attribute arrays are enabled in s_vao (only this file
  * touches it): enable and disable only on change. */
 static uint32_t s_attr_on;
+
+/* RECOMP_GL_LEAN=1: fewer GL calls per draw (off by default; a title turns
+ * it on in its own defaults). On the Switch's Mesa each call has a price:
+ *   - interleaved vertices go into the streaming buffer at a whole multiple
+ *     of their stride and are drawn with a base vertex, so the attribute
+ *     pointers stay put and are set only when the layout changes -- not up
+ *     to 16 glVertexAttribPointer calls a draw, each re-validating the
+ *     vertex setup;
+ *   - a program's uniforms go up one by one as they change, not all ~19
+ *     whenever any of them does. */
+static int s_lean = -1;
+static int lean_on(void)
+{
+    if (s_lean < 0) {
+        const char *e = getenv("RECOMP_GL_LEAN");
+        s_lean = e && e[0] == '1' && glDrawElementsBaseVertex;
+        fprintf(stderr, "  [GL] lean draws %s (RECOMP_GL_LEAN)\n", s_lean ? "on" : "off");
+    }
+    return s_lean;
+}
+/* What glVertexAttribPointer last got for each attribute of s_vao in the
+ * base-vertex layout (offsets within a vertex); valid = 0 after any other
+ * path set pointers. */
+static struct { GLint size; GLenum type; GLboolean norm; GLsizei stride; GLintptr off; } s_vptr[NV2A_RAW_ATTRS];
+static uint32_t s_vptr_valid;               /* bit per attribute */
+static GLint s_base_vertex = -1;            /* upload_vertices: base vertex, or -1 */
 static void attr_enable(uint32_t a, int on)
 {
     uint32_t bit = 1u << a;
@@ -4352,6 +4389,62 @@ static int upload_vertices(const Nv2aRawBatch *b)
     if (!nv)
         return 0;
     nrun = vertex_runs(b, run, of_run);
+    s_base_vertex = -1;
+    if (nrun == 1 && !conv && lean_on()) {
+        /* One interleaved range with one stride: placed at a multiple of the
+         * stride, pointers relative to the buffer's start (see lean_on). */
+        uint32_t S = 0;
+        int ok = 1;
+        for (a = 0; a < NV2A_RAW_ATTRS; a++)
+            if (b->attr_direct & (1u << a)) {
+                if (!S) S = b->direct[a].stride;
+                if (b->direct[a].stride != S) ok = 0;
+            }
+        if (ok && S && S <= 512) {
+            GLsizeiptr len = (GLsizeiptr)(run[0].hi - run[0].lo);
+            GLintptr at0, atS;
+            at0 = ring_alloc(&s_vring, len + S, &map);
+            atS = (at0 + (GLintptr)S - 1) / (GLintptr)S * (GLintptr)S;
+            if (map) {
+                memcpy((uint8_t *)map + (atS - at0), run[0].lo, (size_t)len);
+                ring_done(&s_vring, at0, len + S, map, NULL);
+            } else {
+                ring_done(&s_vring, atS, len, NULL, run[0].lo);
+            }
+            s_vring.off = atS + len;            /* a merge appends right after */
+            s_upload_at = atS;
+            s_base_vertex = (GLint)(atS / (GLintptr)S);
+            for (a = 0; a < NV2A_RAW_ATTRS; a++) {
+                GLint size;
+                GLenum type;
+                GLboolean norm;
+                GLintptr off;
+                if (!(b->attr_present & (1u << a))) {
+                    attr_enable(a, 0);
+                    continue;
+                }
+                attr_enable(a, 1);
+                off = (GLintptr)(b->direct[a].ptr - run[0].lo);
+                size = (GLint)b->direct[a].size;
+                switch (b->direct[a].type) {
+                case 0:  size = GL_BGRA; type = GL_UNSIGNED_BYTE; norm = GL_TRUE; break;
+                case 1:  type = GL_SHORT; norm = GL_TRUE; break;
+                case 2:  type = GL_FLOAT; norm = GL_FALSE; break;
+                case 4:  type = GL_UNSIGNED_BYTE; norm = GL_TRUE; break;
+                default: type = GL_SHORT; norm = GL_FALSE; break;
+                }
+                if ((s_vptr_valid & (1u << a)) && s_vptr[a].size == size && s_vptr[a].type == type
+                    && s_vptr[a].norm == norm && s_vptr[a].stride == (GLsizei)S && s_vptr[a].off == off)
+                    continue;
+                glVertexAttribPointer(a, size, type, norm, (GLsizei)S, (const void *)(uintptr_t)off);
+                s_vptr[a].size = size; s_vptr[a].type = type; s_vptr[a].norm = norm;
+                s_vptr[a].stride = (GLsizei)S; s_vptr[a].off = off;
+                s_vptr_valid |= 1u << a;
+            }
+            return 1;
+        }
+    }
+    s_vptr_valid = 0;                       /* the pointers below are absolute */
     for (i = 0; i < nrun; i++) {
         run[i].at = bytes;
         bytes += ((GLsizeiptr)(run[i].hi - run[i].lo) + 15) & ~(GLsizeiptr)15;
@@ -4632,26 +4725,33 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
                 UF(xform, UF_XFORM); UF(afunc, UF_AFUNC);
 #undef UF
             }
-            p->uni = u;
-            p->uni_valid = 1;
-            if (p->u_surf >= 0) glUniform4fv(p->u_surf, 1, u.surf);
-            if (p->u_snapy >= 0) glUniform1f(p->u_snapy, u.snapy);
-            if (p->u_aa >= 0) glUniform2fv(p->u_aa, 1, u.aa);
-            if (p->u_m >= 0) glUniform4fv(p->u_m, p->n_m, u.m);
-            if (p->u_vpoff >= 0) glUniform4fv(p->u_vpoff, 1, u.vpoff);
-            if (p->u_xform >= 0) glUniform1i(p->u_xform, u.xform);
-            if (p->u_mv >= 0) glUniform4fv(p->u_mv, p->n_mv, u.mv);
-            if (p->u_fogplane >= 0) glUniform4fv(p->u_fogplane, 1, u.fogplane);
-            if (p->u_fog0 >= 0) glUniform4fv(p->u_fog0, 1, u.fog0);
-            if (p->u_fog1 >= 0) glUniform4fv(p->u_fog1, 1, u.fog1);
-            if (p->u_tscale >= 0) glUniform2fv(p->u_tscale, p->n_tscale, &u.tscale[0][0]);
-            if (p->u_c0 >= 0) glUniform4fv(p->u_c0, p->n_c0, &u.c0[0][0]);
-            if (p->u_c1 >= 0) glUniform4fv(p->u_c1, p->n_c1, &u.c1[0][0]);
-            if (p->u_fogcolor >= 0) glUniform4fv(p->u_fogcolor, 1, u.fog);
-            if (p->u_fc0 >= 0) glUniform4fv(p->u_fc0, 1, u.fc[0]);
-            if (p->u_fc1 >= 0) glUniform4fv(p->u_fc1, 1, u.fc[1]);
-            if (p->u_afunc >= 0) glUniform1i(p->u_afunc, u.afunc);
-            if (p->u_aref >= 0) glUniform1f(p->u_aref, u.aref);
+            {
+                /* Lean: only what changed (all of it the first time). */
+                struct GlUni old = p->uni;
+                int all = !p->uni_valid || !lean_on();
+#define CH(f) (all || memcmp(&u.f, &old.f, sizeof u.f))
+                p->uni = u;
+                p->uni_valid = 1;
+                if (p->u_surf >= 0 && CH(surf)) glUniform4fv(p->u_surf, 1, u.surf);
+                if (p->u_snapy >= 0 && CH(snapy)) glUniform1f(p->u_snapy, u.snapy);
+                if (p->u_aa >= 0 && CH(aa)) glUniform2fv(p->u_aa, 1, u.aa);
+                if (p->u_m >= 0 && CH(m)) glUniform4fv(p->u_m, p->n_m, u.m);
+                if (p->u_vpoff >= 0 && CH(vpoff)) glUniform4fv(p->u_vpoff, 1, u.vpoff);
+                if (p->u_xform >= 0 && CH(xform)) glUniform1i(p->u_xform, u.xform);
+                if (p->u_mv >= 0 && CH(mv)) glUniform4fv(p->u_mv, p->n_mv, u.mv);
+                if (p->u_fogplane >= 0 && CH(fogplane)) glUniform4fv(p->u_fogplane, 1, u.fogplane);
+                if (p->u_fog0 >= 0 && CH(fog0)) glUniform4fv(p->u_fog0, 1, u.fog0);
+                if (p->u_fog1 >= 0 && CH(fog1)) glUniform4fv(p->u_fog1, 1, u.fog1);
+                if (p->u_tscale >= 0 && CH(tscale)) glUniform2fv(p->u_tscale, p->n_tscale, &u.tscale[0][0]);
+                if (p->u_c0 >= 0 && CH(c0)) glUniform4fv(p->u_c0, p->n_c0, &u.c0[0][0]);
+                if (p->u_c1 >= 0 && CH(c1)) glUniform4fv(p->u_c1, p->n_c1, &u.c1[0][0]);
+                if (p->u_fogcolor >= 0 && CH(fog)) glUniform4fv(p->u_fogcolor, 1, u.fog);
+                if (p->u_fc0 >= 0 && CH(fc[0])) glUniform4fv(p->u_fc0, 1, u.fc[0]);
+                if (p->u_fc1 >= 0 && CH(fc[1])) glUniform4fv(p->u_fc1, 1, u.fc[1]);
+                if (p->u_afunc >= 0 && CH(afunc)) glUniform1i(p->u_afunc, u.afunc);
+                if (p->u_aref >= 0 && CH(aref)) glUniform1f(p->u_aref, u.aref);
+#undef CH
+            }
         }
     }
 
@@ -5023,6 +5123,7 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
             s_mg.ds = s->ds_on;
             s_mg.mode = mmode;
             s_mg.staged = 1;
+            s_mg.bv = -1;
             s_mg.slay = SL;
             s_mg.n = 0;
             s_mg.maxv = 0;
@@ -5051,6 +5152,7 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
             s_mg.ds = s->ds_on;
             s_mg.mode = mmode;
             s_mg.vbase = s_upload_at;
+            s_mg.bv = s_base_vertex;
             s_mg.lay = L;
             s_mg.n = 0;
             s_mg.maxv = b->vertex_count;
@@ -5112,7 +5214,11 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
                     b->attr_present, b->xform, b->vp_start, pk.shader_program, pk.control,
                     r[0x1B00 / 4], (r[0x1B04 / 4] >> 8) & 0xFF);
         pf_mark(PF_VTX);
-        glDrawElements(mode, (GLsizei)n, idx_type, (const void *)(uintptr_t)idx_at);
+        if (s_base_vertex >= 0)
+            glDrawElementsBaseVertex(mode, (GLsizei)n, idx_type, (const void *)(uintptr_t)idx_at,
+                                     s_base_vertex);
+        else
+            glDrawElements(mode, (GLsizei)n, idx_type, (const void *)(uintptr_t)idx_at);
         s_pf_calls++;
         pf_mark(PF_DRAW);
         if (s_pf_on > 0) {

@@ -214,6 +214,7 @@ X(GLboolean, glUnmapBuffer, (GLenum)) \
     X(GLenum, glClientWaitSync, (GLsync, GLbitfield, GLuint64)) \
     X(void, glDeleteSync, (GLsync)) \
     X(void, glGenQueries, (GLsizei, GLuint *)) \
+    X(void, glDrawElementsBaseVertex, (GLenum, GLsizei, GLenum, const void *, GLint)) \
     X(GLuint, glGetUniformBlockIndex, (GLuint, const GLchar *)) \
     X(void, glUniformBlockBinding, (GLuint, GLuint, GLuint)) \
     X(void, glBindBufferRange, (GLenum, GLuint, GLuint, GLintptr, GLsizeiptr)) \
@@ -339,6 +340,7 @@ int nv2a_gl_load(void *(*getproc)(const char *name));
 #define glClientWaitSync         p_glClientWaitSync
 #define glDeleteSync             p_glDeleteSync
 #define glGenQueries             p_glGenQueries
+#define glDrawElementsBaseVertex p_glDrawElementsBaseVertex
 #define glGetUniformBlockIndex   p_glGetUniformBlockIndex
 #define glUniformBlockBinding    p_glUniformBlockBinding
 #define glBindBufferRange        p_glBindBufferRange
