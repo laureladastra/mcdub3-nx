@@ -11,9 +11,14 @@
 
 /* Settings this game starts with unless mcdub3remix_env.txt (or the
  * environment) says otherwise (src/main.c, set_runtime_defaults).
- * RECOMP_GL_MERGE=0: merging draws gave the Remix's rain races a frame over
- * 80 ms about every second (1.2/s, against 0.2/s without; Switch,
- * 2026-10-28) -- the stutter -- where the DUB Edition gains from it. */
+ * Merging draws with per-draw matrices off (Switch rain races, 2026-10-28):
+ *   merging off                          1262 calls x 21 us, 20 fps
+ *   merging + per-draw matrices          ~900 calls x 36 us, 17.5-18.5 fps
+ *   merging, per-draw matrices off        975 calls x 20 us -- the cheapest
+ * The Remix changes matrices often; each merged call with several matrix
+ * sets uploads two 64-row uniform arrays, and Mesa resends the program's
+ * whole uniform block for each. The DUB Edition keeps both on. */
 #define MC3_GAME_DEFAULTS(X) \
-    X("RECOMP_GL_MERGE", "0") \
-    X("RECOMP_GL_MERGE_KB", "256")   /* when merging is turned on: batches capped */
+    X("RECOMP_GL_MERGE", "1") \
+    X("RECOMP_GL_PERDRAW", "0") \
+    X("RECOMP_GL_MERGE_KB", "256")
