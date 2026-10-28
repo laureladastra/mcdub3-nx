@@ -1326,7 +1326,29 @@ void sub_000847B0(void)
     uint8_t x0, y0;
     if (on < 0) {
         const char *e = getenv("MC3_PAD_TRACE");
+        const char *t = getenv("MC3_PAD_SELFTEST");
         on = e && e[0] == '1';
+        if (t && t[0] == '1') {
+            /* Once: the lifted shaping over every x byte (y centred) with
+             * this call's weight, for tools/difftest-style comparison with
+             * the original in Unicorn. Guest stack below esp as scratch. */
+            uint32_t sx = g_esp - 0x200, sy = g_esp - 0x1FC, arg = MEM32(g_esp + 4);
+            uint32_t esi0 = g_esi, edi0 = g_edi, esp0 = g_esp, b;
+            char line[1100];
+            size_t q = 0;
+            for (b = 0; b < 256; b++) {
+                MEM8(sx) = (uint8_t)b;
+                MEM8(sy) = 0x80;
+                g_esi = sx; g_edi = sy;
+                g_esp = esp0 - 0x100;
+                g_esp -= 4; MEM32(g_esp) = arg;
+                g_esp -= 4; MEM32(g_esp) = 0;          /* return address */
+                sub_000847B0_gen();                    /* ret: pops it */
+                q += (size_t)snprintf(line + q, sizeof line - q, "%02X", MEM8(sx));
+            }
+            g_esi = esi0; g_edi = edi0; g_esp = esp0;
+            fprintf(stderr, "[PAD] selftest weight %08X: x out for x in 00..FF: %s\n", arg, line);
+        }
     }
     if (!on) {
         sub_000847B0_gen();
