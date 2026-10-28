@@ -212,7 +212,15 @@ X(GLboolean, glUnmapBuffer, (GLenum)) \
     X(void, glBufferStorage, (GLenum, GLsizeiptr, const void *, GLbitfield)) \
     X(GLsync, glFenceSync, (GLenum, GLbitfield)) \
     X(GLenum, glClientWaitSync, (GLsync, GLbitfield, GLuint64)) \
-    X(void, glDeleteSync, (GLsync))
+    X(void, glDeleteSync, (GLsync)) \
+    X(void, glGenQueries, (GLsizei, GLuint *)) \
+    X(void, glBeginQuery, (GLenum, GLuint)) \
+    X(void, glEndQuery, (GLenum)) \
+    X(void, glGetQueryObjectiv, (GLuint, GLenum, GLint *)) \
+    X(void, glGetQueryObjectui64v, (GLuint, GLenum, GLuint64 *))
+#define GL_TIME_ELAPSED                   0x88BF
+#define GL_QUERY_RESULT                   0x8866
+#define GL_QUERY_RESULT_AVAILABLE         0x8867
 #define GL_TEXTURE_BASE_LEVEL             0x813C
 #define GL_TEXTURE_MAX_LEVEL              0x813D
 #define GL_TEXTURE_LOD_BIAS               0x8501
@@ -324,5 +332,10 @@ int nv2a_gl_load(void *(*getproc)(const char *name));
 #define glFenceSync              p_glFenceSync
 #define glClientWaitSync         p_glClientWaitSync
 #define glDeleteSync             p_glDeleteSync
+#define glGenQueries             p_glGenQueries
+#define glBeginQuery             p_glBeginQuery
+#define glEndQuery               p_glEndQuery
+#define glGetQueryObjectiv       p_glGetQueryObjectiv
+#define glGetQueryObjectui64v    p_glGetQueryObjectui64v
 
 #endif /* NV2A_GL_API_H */

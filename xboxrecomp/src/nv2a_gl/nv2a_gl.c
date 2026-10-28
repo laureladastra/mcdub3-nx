@@ -208,6 +208,12 @@ static inline void pf_mark(int phase)
         s_pf_t = now;
     }
 }
+/* GPU time per render target and pass (gq_*, below). */
+enum { GQ_DEPTH = 1, GQ_BLIT, GQ_PRESENT, GQ_END };
+static void gq_mark(uint32_t label, uint32_t w, uint32_t h);
+static void gq_frame_end(void);
+static uint32_t s_gq_draws, s_gq_zconv;             /* draws / depth conversions since */
+static const void *s_gq_surf;                        /* the target the last mark opened */
 static GLuint        s_cur_prog;         /* what glUseProgram last got */
 static void state_dirty(void);
 /* Last sampler state set on a GL texture (bind_stage). */
@@ -502,6 +508,10 @@ static GlSurf *surf_bind(const Nv2aSurface *sf, uint32_t zeta_va)
         return NULL;
     s = surf_get(sf->color_va, w, h, sf->aa_sx ? sf->aa_sx : 1,
                  sf->aa_sy ? sf->aa_sy : 1);
+    if (s != s_gq_surf) {
+        gq_mark(s->va, s->pw, s->ph);
+        s_gq_surf = s;
+    }
     {   /* The widest clip of the frame: a narrower pass into the same
          * surface (MC3's minimap, 175 wide) must not crop what is shown. */
         uint32_t cw = sf->clip_x + sf->width < s->w ? sf->clip_x + sf->width : s->w;
@@ -1678,6 +1688,9 @@ static GLuint depth_as_color(uint32_t va, uint32_t color, int convert, const GlD
         return d->rgba;                      /* stale or 0: better than guest bytes */
     if (!zconv_init())
         return 0;
+    gq_mark(GQ_DEPTH, d->pw, d->ph);         /* its GPU time on its own line */
+    s_gq_surf = NULL;
+    s_gq_zconv++;
     if (!d->rgba) {
         glGenTextures(1, &d->dtex);
         glBindTexture(GL_TEXTURE_2D, d->dtex);
@@ -4385,6 +4398,7 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
     if (!p)
         return;
     s_hz_draws++;
+    s_gq_draws++;
     if (p->prog != s_cur_prog) {
         glUseProgram(p->prog);
         s_cur_prog = p->prog;
@@ -5444,6 +5458,8 @@ static void gl_blit(const Nv2aBlit *b)
     dst = surf_find(b->dst_va);
     if (!src || !dst)
         return;
+    gq_mark(GQ_BLIT, dst->pw, dst->ph);
+    s_gq_surf = NULL;
     if (src == dst) {
         static int shown;
         if (shown++ < 4)
@@ -5685,6 +5701,8 @@ static void gl_flip(void)
     glDisable(GL_SCISSOR_TEST);
     glColorMask(1, 1, 1, 1);
     glClearColor(0, 0, 0, 1);
+    gq_mark(GQ_PRESENT, (uint32_t)ww, (uint32_t)wh);
+    s_gq_surf = NULL;
     glClear(GL_COLOR_BUFFER_BIT);
     {
         /* nv2a_present.h: the drawn width, 16:9 for a widescreen title. */
@@ -5721,6 +5739,7 @@ swap:
     gl_step_done("present");
     pf_start();
     SDL_GL_SwapWindow(s_win);
+    gq_frame_end();
     s_mg_fb_draw = s_mg_fb_read = 0xFFFFFFFFu;   /* whatever the swap did */
     pf_mark(PF_SWAP);
     if (s_pf_on > 0)
@@ -6141,6 +6160,158 @@ static void *q_gl_thread(void *arg)
 /* One line for the perf report: per frame shown, the draws and how many
  * ms each phase of them took on the GL thread (the rest of its busy time is
  * clears, blits, the present pass, queue handling). Resets the counts. */
+/* ── GPU time per render target and pass (MC3_PERF) ──────────────────
+ *
+ * The GL thread's "draw" phase is the time the driver blocks in a draw
+ * call; past a point that is the GPU being behind, and the CPU-side
+ * profile cannot say on what. A GPU timer (GL_TIME_ELAPSED; Apple's GL has
+ * no timestamps) runs from wherever the frame moves to another render
+ * target or pass -- a surface, the depth-to-colour conversion, a 2D blit,
+ * the present -- to the next such place. Read back GQ_FRAMES
+ * flips later, without waiting (a frame not done by then is skipped); the
+ * perf report lists the targets that took most, per frame. Remix rain
+ * races, 2026-10-28: the same draws as the DUB Edition's, twice the time
+ * blocked in them. RECOMP_GL_GPUTIME=0 off. */
+#define GQ_FRAMES 4
+#define GQ_MAX 128
+static struct {
+    GLuint q[GQ_MAX];
+    uint32_t label[GQ_MAX], w[GQ_MAX], h[GQ_MAX], draws[GQ_MAX], zconv[GQ_MAX];
+    int n, pending;
+} s_gq[GQ_FRAMES];
+static int s_gq_on = -1, s_gq_slot;
+#define GQ_BUCKETS 48
+static struct { uint32_t label, w, h; uint64_t ns; uint32_t draws, zconv; } s_gqb[GQ_BUCKETS];
+static uint64_t s_gq_total_ns;
+static uint32_t s_gq_frames, s_gq_skipped;
+
+static int gq_enabled(void)
+{
+    if (s_gq_on < 0) {
+        const char *e = getenv("RECOMP_GL_GPUTIME");
+        s_gq_on = s_pf_on > 0 && !(e && e[0] == '0') && glGenQueries && glBeginQuery
+                  && glEndQuery && glGetQueryObjectiv && glGetQueryObjectui64v;
+        if (s_pf_on > 0)
+            fprintf(stderr, "  [GL] GPU time per render target %s (RECOMP_GL_GPUTIME)\n",
+                    s_gq_on ? "measured" : "not measured");
+    }
+    return s_gq_on;
+}
+
+static void gq_mark(uint32_t label, uint32_t w, uint32_t h)
+{
+    int n;
+    if (s_pf_on <= 0 || !gq_enabled())
+        return;
+    n = s_gq[s_gq_slot].n;
+    if (n >= GQ_MAX && label != GQ_END)
+        return;                         /* full: the running timer takes the rest */
+    merge_flush();                      /* a held draw belongs to the target before */
+    if (n > 0) {
+        s_gq[s_gq_slot].draws[n - 1] = s_gq_draws;
+        s_gq[s_gq_slot].zconv[n - 1] = s_gq_zconv;
+    }
+    s_gq_draws = s_gq_zconv = 0;
+    if (n > 0)
+        glEndQuery(GL_TIME_ELAPSED);
+    if (label == GQ_END) {              /* closes the frame's last target */
+        s_gq[s_gq_slot].n = n;
+        return;
+    }
+    if (!s_gq[s_gq_slot].q[n])
+        glGenQueries(1, &s_gq[s_gq_slot].q[n]);
+    glBeginQuery(GL_TIME_ELAPSED, s_gq[s_gq_slot].q[n]);
+    s_gq[s_gq_slot].label[n] = label;
+    s_gq[s_gq_slot].w[n] = w;
+    s_gq[s_gq_slot].h[n] = h;
+    s_gq[s_gq_slot].n = n + 1;
+}
+
+static void gq_frame_end(void)
+{
+    int i, k;
+    GLint ok = 0;
+    if (s_pf_on <= 0 || !gq_enabled())
+        return;
+    gq_mark(GQ_END, 0, 0);
+    s_gq[s_gq_slot].pending = 1;
+    s_gq_slot = (s_gq_slot + 1) % GQ_FRAMES;
+    s_gq_surf = NULL;
+    /* The slot about to be reused: the frame GQ_FRAMES flips ago. */
+    {
+        typeof(s_gq[0]) *F = &s_gq[s_gq_slot];
+        if (F->pending && F->n > 0) {
+            glGetQueryObjectiv(F->q[F->n - 1], GL_QUERY_RESULT_AVAILABLE, &ok);
+            if (!ok) {
+                s_gq_skipped++;
+            } else {
+                for (i = 0; i < F->n; i++) {
+                    GLuint64 dt = 0;
+                    glGetQueryObjectui64v(F->q[i], GL_QUERY_RESULT, &dt);
+                    s_gq_total_ns += dt;
+                    for (k = 0; k < GQ_BUCKETS; k++)
+                        if (!s_gqb[k].ns && !s_gqb[k].draws && !s_gqb[k].label) {
+                            s_gqb[k].label = F->label[i]; s_gqb[k].w = F->w[i]; s_gqb[k].h = F->h[i];
+                            break;
+                        } else if (s_gqb[k].label == F->label[i] && s_gqb[k].w == F->w[i]
+                                   && s_gqb[k].h == F->h[i]) {
+                            break;
+                        }
+                    if (k < GQ_BUCKETS) {
+                        s_gqb[k].ns += dt;
+                        s_gqb[k].draws += F->draws[i];
+                        s_gqb[k].zconv += F->zconv[i];
+                    }
+                }
+                s_gq_frames++;
+            }
+        }
+        F->n = 0;
+        F->pending = 0;
+    }
+}
+
+/* The perf report's GPU line: total, then the targets that took most. */
+static void gq_report(void)
+{
+    char line[900];
+    size_t q = 0;
+    int j, k;
+    uint32_t fr = s_gq_frames ? s_gq_frames : 1;
+    if (s_gq_on <= 0)
+        return;
+    q += (size_t)snprintf(line, sizeof line, "[perf] GPU per frame %.1f ms (%u frames timed,"
+                          " %u not ready):", s_gq_total_ns / 1e6 / fr, s_gq_frames, s_gq_skipped);
+    for (j = 0; j < 10 && q < sizeof line - 100; j++) {
+        int best = -1;
+        for (k = 0; k < GQ_BUCKETS; k++)
+            if (s_gqb[k].ns && (best < 0 || s_gqb[k].ns > s_gqb[best].ns))
+                best = k;
+        if (best < 0 || s_gqb[best].ns / fr < 100000)       /* under 0.1 ms */
+            break;
+        if (s_gqb[best].label == GQ_DEPTH)
+            q += (size_t)snprintf(line + q, sizeof line - q, " depth->colour %ux%u", s_gqb[best].w, s_gqb[best].h);
+        else if (s_gqb[best].label == GQ_BLIT)
+            q += (size_t)snprintf(line + q, sizeof line - q, " 2D blits");
+        else if (s_gqb[best].label == GQ_PRESENT)
+            q += (size_t)snprintf(line + q, sizeof line - q, " present %ux%u", s_gqb[best].w, s_gqb[best].h);
+        else
+            q += (size_t)snprintf(line + q, sizeof line - q, " surface %08X %ux%u",
+                                  s_gqb[best].label, s_gqb[best].w, s_gqb[best].h);
+        q += (size_t)snprintf(line + q, sizeof line - q, " %.1f ms", s_gqb[best].ns / 1e6 / fr);
+        if (s_gqb[best].label > GQ_END)
+            q += (size_t)snprintf(line + q, sizeof line - q, " (%u draws)", s_gqb[best].draws / fr);
+        if (s_gqb[best].label == GQ_DEPTH)
+            q += (size_t)snprintf(line + q, sizeof line - q, " (%u conversions)", s_gqb[best].zconv / fr);
+        q += (size_t)snprintf(line + q, sizeof line - q, ";");
+        s_gqb[best].ns = 0;
+    }
+    fprintf(stderr, "%s\n", line);
+    memset(s_gqb, 0, sizeof s_gqb);
+    s_gq_total_ns = 0;
+    s_gq_frames = s_gq_skipped = 0;
+}
+
 void nv2a_gl_prof_stats(double secs, char *out, size_t n)
 {
     uint32_t fr = s_pf_frames ? s_pf_frames : 1;
@@ -6216,6 +6387,7 @@ void nv2a_gl_prof_stats(double secs, char *out, size_t n)
             q += (size_t)snprintf(line + q, sizeof line - q, ";");
             s_census[best].n = 0;
         }
+        gq_report();
         fprintf(stderr, "%s rest %u; folded with own matrices %u (in %u calls)\n", line,
                 s_census_other / fr, s_pf_permat / fr, s_pf_permat_calls / fr);
         s_pf_permat = s_pf_permat_calls = 0;
