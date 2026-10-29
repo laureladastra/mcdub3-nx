@@ -417,6 +417,21 @@ static GlSurf *surf_get(uint32_t va, uint32_t w, uint32_t h,
     s->aa_sx = aa_sx; s->aa_sy = aa_sy;
     {
         double kx = s_scale, ky = s_scale;
+        /* RECOMP_GL_SMALL_SCALE=<k>: off-screen targets narrower than 512
+         * (the title's glow, shadow and reflection buffers) at scale k, the
+         * screen and the scene at RECOMP_GL_SCALE. The Remix's 384x240
+         * effect buffer, drawn into up to 60 times a frame, took 5.3 ms of
+         * GPU at 1x and 11.6 ms at 1.5 (Switch rain race, 2026-10-29) -- for
+         * a buffer that is blurred anyway. Unset: one scale for all. */
+        static double small = -1.0;
+        if (small < 0.0) {
+            const char *e = getenv("RECOMP_GL_SMALL_SCALE");
+            small = e && atof(e) > 0.0 ? atof(e) : 0.0;
+            if (small > 0.0)
+                fprintf(stderr, "  [GL] targets narrower than 512 at %gx (RECOMP_GL_SMALL_SCALE)\n", small);
+        }
+        if (small > 0.0 && w < 512 && small < s_scale)
+            kx = ky = small;
         if (s_square < 0) {
             const char *e = getenv("RECOMP_GL_SQUARE");
             s_square = !(e && *e == '0') && xbox_video_widescreen();
