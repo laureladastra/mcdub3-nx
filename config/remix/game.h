@@ -26,5 +26,6 @@
     X("RECOMP_GL_PERDRAW", "0") \
     X("RECOMP_GL_MERGE_KB", "256") \
     X("RECOMP_GL_CUBO", "1")          /* constants through a uniform buffer */ \
-    X("RECOMP_GL_LEAN", "1")          /* uniforms sent as they change (base-vertex draws: no, GPU +10 ms) */ \
-    X("RECOMP_GL_SHARPEN", "0")       /* no CAS: part of the present pass's ~2.7 ms of GPU */
+    X("RECOMP_GL_LEAN", "0")          /* uniforms all re-sent at a change: played better (2026-10-29) */ \
+    X("RECOMP_GL_SMALL_SCALE", "1")   /* effect buffers at 1x: 1.5 cost 6 ms more GPU */ \
+    X("RECOMP_GL_SHARPEN", "0.5")     /* CAS on, as the DUB Edition: played better (2026-10-29) */
