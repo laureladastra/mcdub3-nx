@@ -2,20 +2,19 @@
 
 ## v0.5.0
 
-**A big speed update for both games on the Switch.** Races, especially in the rain, now run close to the game's own top speed of 30 frames per second most of the time, and the short freezes during races are gone.
+**A big speed update for both games on the Switch.** Races, especially in the rain, now run close to the game's own top speed of 30 FPS most of the time. Freezes during races are minimised.
 
 ### Features
 
-- **Faster races in both games.** Measured in rain races on the Switch (at the default picture size):
+- Measured in rain races on the Switch (at the default 1x picture size):
 
-  | | v0.4.0 | v0.5.0 |
-  |---|---|---|
-  | Midnight Club 3: DUB Edition | 23 frames per second | **28.5** |
+  |                                    | v0.4.0                 | v0.5.0   |
+  | ---------------------------------- | ---------------------- | -------- |
+  | Midnight Club 3: DUB Edition       | 23 frames per second   | **28.5** |
   | Midnight Club 3: DUB Edition Remix | 20.5 frames per second | **27.5** |
 
-  The game itself never runs faster than 30, as on the original Xbox, so most of the time you are now at or near full speed. The work behind it: the Switch's graphics driver has a fixed cost for every object the game asks it to draw, and a race draws over a thousand a frame. The port now sends far fewer separate requests, hands the graphics chip its settings in larger blocks, and prepares textures faster.
-- **No more half-second freezes in races.** The game stopped for about half a second now and then during a race, most often right after the start. A sound that was told to stop waited for an answer from the emulated sound chip that could not arrive in time. It now stops right away, as the original would.
-- **Video clips.** Holding the Capture button now saves the last 30 seconds, as in other Switch games, instead of about one second. To turn it off and save some memory, add `MC3_RECORDING=0` to your settings file.
+  The game itself never runs faster than 30, as on the original Xbox, so most of the time you are now at or near full speed.
+- **No more half-second freezes in races.** The game stopped for about half a second now and then during a race, most often right after the start.
 - **Sharper look for less effort (Remix).** The Remix's glow and blur effects are drawn at normal size even when you raise the picture size, which cost a lot of speed for something that is blurred anyway.
 
 ### Other changes
@@ -30,7 +29,7 @@
 - **Remix:** keep the picture size at 1 (`RECOMP_GL_SCALE=1` in `mcdub3remix_env.txt`). Higher values still cost the Remix more than the DUB Edition.
 - After updating, the first race or two may stutter briefly while the game prepares its graphics again. This settles once the file `progcache.bin` has been rebuilt; don't delete it afterwards.
 
-### Known issues
+### ⚠️ Known issues
 
 - **Remix:** in the busiest parts of the city at high speed, the Remix's wide speed camera shows far more buildings than usual and the game can drop to around 12 frames per second for a few seconds; your car then feels slower too. This is the next thing being worked on.
 - Right after a race starts, the game can still pause for about half a second while it loads the race's textures.
@@ -71,7 +70,7 @@
   after updating, as the converted game code changed.
 - `make mac-app` takes the disc folder as `DISC=` (it was `GAME=`).
 
-### Known issues
+### ⚠️ Known issues
 
 - Driving on the Switch runs at 18-25 frames per second.
 - A race can occasionally hang (the screen stops, the game does not crash).
@@ -91,7 +90,7 @@
 - **Readable tutorial video text**: the text within tutorial videos is no longer scrambled at higher game resolutions.
 - **Saves**: profiles from an original Xbox (a memory unit dump such as a `.gsx` from a save site) can be imported with `make import-save`, and profiles can be copied between the Switch and a computer over FTP with `make save-sync-down` / `make save-sync-up` (see the README's Saves section).
 
-### Known issues
+### ⚠️ Known issues
 
 - Menus and the city flythroughs run below full speed on the Switch.
 - The circles on the career loading screen sometimes stutter.
@@ -110,7 +109,7 @@ This is a beta release of the game to provide early access to the community. Exp
 - Widescreen, higher resolutions and picture settings
   (`mcdub3_env.txt`; see the README's Settings section).
 
-### Known issues
+### ⚠️ Known issues
 
 - Menus and the city flythroughs run below full speed on the Switch.
 - Occasional hangs on career loading screens and in races are being worked
