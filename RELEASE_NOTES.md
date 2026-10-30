@@ -1,5 +1,40 @@
 # Release notes
 
+## v0.5.0
+
+**A big speed update for both games on the Switch.** Races, especially in the rain, now run close to the game's own top speed of 30 frames per second most of the time, and the short freezes during races are gone.
+
+### Features
+
+- **Faster races in both games.** Measured in rain races on the Switch (at the default picture size):
+
+  | | v0.4.0 | v0.5.0 |
+  |---|---|---|
+  | Midnight Club 3: DUB Edition | 23 frames per second | **28.5** |
+  | Midnight Club 3: DUB Edition Remix | 20.5 frames per second | **27.5** |
+
+  The game itself never runs faster than 30, as on the original Xbox, so most of the time you are now at or near full speed. The work behind it: the Switch's graphics driver has a fixed cost for every object the game asks it to draw, and a race draws over a thousand a frame. The port now sends far fewer separate requests, hands the graphics chip its settings in larger blocks, and prepares textures faster.
+- **No more half-second freezes in races.** The game stopped for about half a second now and then during a race, most often right after the start. A sound that was told to stop waited for an answer from the emulated sound chip that could not arrive in time. It now stops right away, as the original would.
+- **Video clips.** Holding the Capture button now saves the last 30 seconds, as in other Switch games, instead of about one second. To turn it off and save some memory, add `MC3_RECORDING=0` to your settings file.
+- **Sharper look for less effort (Remix).** The Remix's glow and blur effects are drawn at normal size even when you raise the picture size, which cost a lot of speed for something that is blurred anyway.
+
+### Other changes
+
+- Each game now has its own tuned graphics settings, so improving one game does not change the other.
+- Saves can be copied between the Switch and a computer for the Remix too (`make save-sync-down GAME=remix`).
+- Fewer files are written to the SD card at every start (some leftover diagnostic files are no longer created; you can delete any `progcache-slow` files you find).
+- For developers: a much more detailed performance report with `MC3_PERF=2` (time per part of a frame, on the processor and the graphics chip, and why draws could not be combined).
+
+### Tips
+
+- **Remix:** keep the picture size at 1 (`RECOMP_GL_SCALE=1` in `mcdub3remix_env.txt`). Higher values still cost the Remix more than the DUB Edition.
+- After updating, the first race or two may stutter briefly while the game prepares its graphics again. This settles once the file `progcache.bin` has been rebuilt; don't delete it afterwards.
+
+### Known issues
+
+- **Remix:** in the busiest parts of the city at high speed, the Remix's wide speed camera shows far more buildings than usual and the game can drop to around 12 frames per second for a few seconds; your car then feels slower too. This is the next thing being worked on.
+- Right after a race starts, the game can still pause for about half a second while it loads the race's textures.
+
 ## v0.4.0
 
 **This is the first release of Midnight Club 3: DUB Edition Remix**. Runs from boot to the finish line: intro movies, menus, garage, career and races, with music and sound. It ships next to the DUB Edition as its own app, `mcdub3remix-nx-eur.nro`.
