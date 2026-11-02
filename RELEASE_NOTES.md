@@ -1,5 +1,33 @@
 # Release notes
 
+## v1.0.0
+
+**Version 1.0 of both Midnight Club 3: DUB Edition and Midnight Club 3: DUB Edition Remix on the Switch.** Both games play from start to finish, and this release removes the last annoyances: races that felt slow when the frame rate dipped, flickering screens, and stray lines on the picture.
+
+### Features
+
+- **Races keep their real speed (Remix).** The original game moves the race forward by a fixed step every frame, which was fine on the Xbox, where it almost always ran at 30 FPS. On the Switch, in rain, with nitrous or in the busiest streets, the frame rate can dip, and the whole race then went into slow motion: your car, the other cars and the timer. The Remix now moves the race on by the time that really passed, so a dip makes the picture a little less smooth but no longer slows the race down. Racing in the rain and with nitrous feels much steadier.
+- **The same for the DUB Edition, as an option.** Add `MC3_REALTIME=1` to `mcdub3_env.txt` to try it. It becomes the default once it has been tested as well as in the Remix.
+- **No more jumping screens.** Menus and loading screens are drawn for 4:3 TVs, with black strips at the sides, and the port enlarges them to fill your 16:9 screen. When something briefly reached into those strips (the circle animation on loading screens, the message after saving), the picture behind it jumped in size for a moment. The size now stays put.
+- **No more white lines at the edges at speed.** The motion blur when you drive fast could pull in thin white lines along the left, right and bottom edges of the picture. Fixed in both games.
+
+### Other changes
+
+- **Remix:** thin vertical lines along the right edge of the picture are gone.
+- **Mac and Linux:** while driving, the arrow keys only work the gas and brake, so the DUB Edition's camera no longer moves in and out when you accelerate and brake with the keyboard. In menus the arrows still move through the lists.
+- **Mac and Linux:** with a UI scale of 2 or more (`RECOMP_GL_UI_SCALE`), faint regular stripes over the race screen are gone.
+- **Remix:** sharpening is back on by default, as in the DUB Edition (`RECOMP_GL_SHARPEN=0` to turn it off).
+
+### Tips
+
+- **Remix:** a picture size of 1 (`RECOMP_GL_SCALE=1` in `mcdub3remix_env.txt`) gives the smoothest races; the DUB Edition handles 1.5 well.
+- For normal play, leave `MC3_PERF` out of your settings file: it is a diagnostic and costs some speed.
+
+### ⚠️ Known issues
+
+- **Remix:** in the busiest parts of the city at full speed with nitrous, the frame rate can still drop for a few seconds. The race no longer slows down, but the picture gets choppier.
+- Right after a race starts, the game can still pause for about half a second while it loads the race's textures.
+
 ## v0.5.0
 
 **A big speed update for both games on the Switch.** Races, especially in the rain, now run close to the game's own top speed of 30 FPS most of the time. Freezes during races are minimised.
