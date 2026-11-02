@@ -1718,6 +1718,77 @@ void sub_00020B60(void)
         fprintf(stderr, "[STATE] %u -> %u\n", before, MEM32(obj + 4));
 }
 
+/* ── Races in real time below 30 fps (MC3_REALTIME=1, opt-in) ──
+ *
+ * The frame step (sub_001EDBE0) runs in a fixed-step mode in races
+ * (0x4FCF39 / 0x4FCF3C set): every frame advances by 0x47C3EC = 1/30 s
+ * whatever it took (the path at 0x001EDEB6), so below 30 fps a race is
+ * slow motion -- the Remix's design too (its twin sub_0020B6F0; there real
+ * time made races clearly steadier on the Switch, 2026-11-02). With
+ * MC3_REALTIME=1 a race frame that took longer advances by the real time,
+ * up to MC3_MAX_DT (0.0667 s), through the variables the fixed path writes:
+ * 0x47C404 (step), 0x47C3DC / 0x47C3E0 (scaled, clamped to [0x47C3F4,
+ * 0x47C3F0]), 0x47C3E4 (reciprocal), 0x4FCF28 (game time). 1/30 steps only.
+ * MC3_TIME_TRACE=1: the steps once a second. */
+extern void sub_001EDBE0_gen(void);
+void sub_001EDBE0(void)
+{
+    static int rt = -1, tr = -1;
+    static float cap;
+    static uint64_t last_ns;
+    static unsigned n;
+    static float lo = 1e9f, hi = 0.0f, sum = 0.0f;
+    static uint32_t last_ms;
+    struct timespec ts;
+    uint64_t now;
+    float real, f, scale, d, cl;
+    int first = MEM8(0x0047C3FCu) != 0;     /* the first frame's own path */
+    if (rt < 0) {
+        const char *e = getenv("MC3_REALTIME"), *c = getenv("MC3_MAX_DT"), *t = getenv("MC3_TIME_TRACE");
+        rt = e && e[0] == '1';
+        tr = t && t[0] == '1';
+        cap = c && atof(c) > 0.0 ? (float)atof(c) : 0.0667f;
+        if (cap > 0.1f) cap = 0.1f;
+        if (rt)
+            fprintf(stderr, "[TIME] races advance in real time below 30 fps, steps up to %.4f s"
+                    " (MC3_REALTIME)\n", cap);
+    }
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    now = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+    real = last_ns ? (float)((now - last_ns) / 1e9) : 0.0f;
+    last_ns = now;
+    sub_001EDBE0_gen();
+    f = MEMF(0x0047C3ECu);
+    scale = MEMF(0x0047C400u);
+    if (rt && !first && (MEM8(0x004FCF39u) || MEM32(0x004FCF3Cu)) && f > 0.030f && f < 0.037f
+        && real > f * 1.1f) {
+        d = real < cap ? real : cap;
+        MEMF(0x0047C404u) = d;
+        MEMF(0x004FCF28u) += (d - f) * scale;       /* game time: the real step */
+        cl = d * scale;
+        MEMF(0x0047C3E0u) = cl;
+        if (cl < MEMF(0x0047C3F4u)) cl = MEMF(0x0047C3F4u);
+        if (cl > MEMF(0x0047C3F0u)) cl = MEMF(0x0047C3F0u);
+        MEMF(0x0047C3DCu) = cl;
+        MEMF(0x0047C3E4u) = 1.0f / cl;
+    }
+    if (!tr)
+        return;
+    n++; sum += MEMF(0x0047C404u);
+    if (MEMF(0x0047C404u) < lo) lo = MEMF(0x0047C404u);
+    if (MEMF(0x0047C404u) > hi) hi = MEMF(0x0047C404u);
+    {
+        uint32_t ms = (uint32_t)(now / 1000000u);
+        if (ms - last_ms >= 1000u) {
+            fprintf(stderr, "[TIME] %u steps/s, step %.4f .. %.4f (mean %.4f) s; fixed step %.4f;"
+                    " clamp %.4f .. %.4f; fixed mode %u/%08X\n", n, lo, hi, n ? sum / n : 0.0f,
+                    f, MEMF(0x0047C3F4u), MEMF(0x0047C3F0u), MEM8(0x004FCF39u), MEM32(0x004FCF3Cu));
+            n = 0; sum = 0.0f; lo = 1e9f; hi = 0.0f;
+            last_ms = ms;
+        }
+    }
+}
+
 /* ── DirectSound: stopping a voice while the APU waits for us ──
  *
  * sub_00391540 waits for a voice to stop: while the voice's flags (+0x12)
