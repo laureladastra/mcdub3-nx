@@ -2204,6 +2204,19 @@ static void bind_stage(const uint32_t *regs, int i, float scale[2])
         rt_scale(w, h, zd->lw, zd->lh, zd->ax ? zd->ax : 1, zd->ay ? zd->ay : 1, scale);
     } else {
         tex = tex_get(va, color, w, h, pitch, (format >> 16) & 0xF);
+        if (s_tex_cur && s_tex_cur->hd_ui && tex == s_tex_cur->hd) {
+            /* The UI upscale's copy is filtered as a picture clamped at its
+             * edges; tiled (repeat or mirror), its edges no longer meet the
+             * next copy's and every tile boundary showed as a faint line --
+             * regular vertical streaks across the Remix's race HUD at
+             * RECOMP_GL_UI_SCALE >= 2 (bug 46, 2026-11-02). Tiled: the
+             * original. */
+            uint32_t ad = regs[base + 2];
+            GLint ws = wrap_mode(ad & 0xF), wt = wrap_mode((ad >> 8) & 0xF);
+            if (ws == GL_REPEAT || ws == GL_MIRRORED_REPEAT
+                || wt == GL_REPEAT || wt == GL_MIRRORED_REPEAT)
+                tex = s_tex_cur->tex;
+        }
         mipped = s_tex_cur && ((s_tex_cur->tex == tex && s_tex_cur->mips > 1)
                                || (s_tex_cur->hd == tex && s_tex_cur->hd_mips));
     }
