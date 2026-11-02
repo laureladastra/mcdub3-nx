@@ -5599,12 +5599,34 @@ static void fxaa_init_early(void)
     state_dirty();
 }
 
+/* The columns of s a present shows: its widest clip of the frame, less
+ * RECOMP_GL_EDGE_TRIM title columns at the right (default 0). The Remix's
+ * race frames end in a column or two the scene does not quite cover --
+ * black beyond -- and stretched to the screen (and sharpened) they showed as
+ * thin vertical streaks along the right edge, on the Switch and upscaled on
+ * the Mac (2026-11-02). */
+static uint32_t present_width(const GlSurf *s)
+{
+    static int trim = -1;
+    uint32_t vw = s->vw ? s->vw : s->w;
+    if (trim < 0) {
+        const char *e = getenv("RECOMP_GL_EDGE_TRIM");
+        trim = e && atoi(e) > 0 ? atoi(e) : 0;
+        if (trim > 16) trim = 16;
+        if (trim)
+            fprintf(stderr, "  [GL] %d column(s) trimmed at the right edge (RECOMP_GL_EDGE_TRIM)\n", trim);
+    }
+    if (trim && vw > 640u + (uint32_t)trim)
+        vw -= (uint32_t)trim;
+    return vw;
+}
+
 /* Present s (sw stored columns drawn) into the window rectangle through
  * FXAA; 0 when it is off (the caller blits). Default framebuffer bound. */
 static int present_fxaa(GlSurf *s, GLint sw, int dx, int dy, int dw, int dh)
 {
     float rcp[2], mx[2], full[4], crop[4], band[2];
-    uint32_t vw = s->vw ? s->vw : s->w;
+    uint32_t vw = present_width(s);
     int fill = 0, held43 = 0;
     if (!fxaa_init())
         return 0;
@@ -5952,7 +5974,7 @@ static void gl_flip(void)
     glClear(GL_COLOR_BUFFER_BIT);
     {
         /* nv2a_present.h: the drawn width, 16:9 for a widescreen title. */
-        uint32_t vw = s->vw ? s->vw : s->w;
+        uint32_t vw = present_width(s);
         GLint sw = (GLint)((uint64_t)s->pw * vw / s->w);
         int rc[4], dx, dy, dw, dh;
         nv2a_present_rect((float)vw / (float)s->aa_sx, (float)s->h / (float)s->aa_sy,
