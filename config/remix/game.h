@@ -31,4 +31,5 @@
     X("MC3_REALTIME", "1")            /* races in real time below 30 fps: steadier (2026-11-02) */ \
     X("RECOMP_GL_EDGE_TRIM", "2")     /* the race frame's last columns: streaks at the right edge */ \
     X("RECOMP_GL_RT_EDGE", "1")       /* speed blur: no white lines at the picture's edges */ \
+    X("RECOMP_GL_FILL_STEADY", "1")   /* loading screens: the 4:3 fill no longer flickers */ \
     X("RECOMP_GL_SHARPEN", "0.5")     /* CAS on, as the DUB Edition: played better (2026-10-29) */

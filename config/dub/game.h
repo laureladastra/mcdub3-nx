@@ -14,4 +14,5 @@
  * edge; the strip there is filled with the edge, so no white lines at the
  * picture's edges at speed (as in the Remix, 2026-11-02). */
 #define MC3_GAME_DEFAULTS(X) \
-    X("RECOMP_GL_RT_EDGE", "1")
+    X("RECOMP_GL_RT_EDGE", "1") \
+    X("RECOMP_GL_FILL_STEADY", "1")   /* loading screens: the 4:3 fill no longer flickers */
