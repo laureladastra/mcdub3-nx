@@ -9,5 +9,9 @@
 #define MC3_CODE_HI          0x00411000u
 
 /* Settings this game starts with unless mcdub3_env.txt (or the environment)
- * says otherwise (src/main.c, set_runtime_defaults): none. */
-#define MC3_GAME_DEFAULTS(X)
+ * says otherwise (src/main.c, set_runtime_defaults).
+ * RECOMP_GL_RT_EDGE=1: the speed blur samples the frame past its image's
+ * edge; the strip there is filled with the edge, so no white lines at the
+ * picture's edges at speed (as in the Remix, 2026-11-02). */
+#define MC3_GAME_DEFAULTS(X) \
+    X("RECOMP_GL_RT_EDGE", "1")

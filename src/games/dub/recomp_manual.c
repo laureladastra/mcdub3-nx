@@ -1789,6 +1789,51 @@ void sub_001EDBE0(void)
     }
 }
 
+/* ── The keyboard while driving ──
+ *
+ * The keyboard's up arrow is the gas (right trigger) and, for menus, left
+ * stick up. In a race the DUB Edition reads stick up/down for its race
+ * camera, as the Remix does, so with the gas held the camera moved in and
+ * back out when braking (Mac, 2026-11-02; a pad's stick stays centred, so
+ * not on the Switch). While the player's race camera control (sub_00293630,
+ * the Remix's sub_002C1520) runs every frame and the game is not paused --
+ * the state machine object at [0x0051886C]: state 3, or its flag at +9 --
+ * the keyboard leaves the stick alone (xbox_keyboard_driving, sdl_keyboard.c).
+ * MC3_KEYS_TRACE=1 logs each change. */
+extern int (*xbox_keyboard_driving)(void);
+static volatile uint32_t s_race_cam_ms;
+
+static uint32_t drive_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint32_t)(ts.tv_sec * 1000u + ts.tv_nsec / 1000000u);
+}
+
+static int dub_driving(void)
+{
+    static int last = -1;
+    uint32_t sm = MEM32(0x0051886Cu);
+    int on = s_race_cam_ms && drive_ms() - s_race_cam_ms < 250u
+             && sm && MEM32(sm + 4) != 3 && MEM8(sm + 9) == 0;
+    if (on != last) {
+        const char *e = getenv("MC3_KEYS_TRACE");
+        if (e && e[0] == '1')
+            fprintf(stderr, "[KEYS] %s: up/down %s\n", on ? "driving" : "not driving",
+                    on ? "are the triggers only" : "move the stick too");
+        last = on;
+    }
+    return on;
+}
+
+extern void sub_00293630_gen(void);
+void sub_00293630(void)
+{
+    s_race_cam_ms = drive_ms();
+    xbox_keyboard_driving = dub_driving;
+    sub_00293630_gen();
+}
+
 /* ── DirectSound: stopping a voice while the APU waits for us ──
  *
  * sub_00391540 waits for a voice to stop: while the voice's flags (+0x12)
