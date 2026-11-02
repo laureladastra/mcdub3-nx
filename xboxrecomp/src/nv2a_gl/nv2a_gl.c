@@ -5683,9 +5683,22 @@ static int fxaa_init(void)
  * last longer (2026-11-02). Here the decision is a counter in a 1x1 texture
  * the GPU updates each frame -- a step towards 1 for black bands, towards 0
  * otherwise -- and the present fills while it is >= 0.5: a change has to
- * hold for 4-5 frames. No readback, so no stall. Two textures, alternating. */
+ * hold for 4-5 frames. No readback, so no stall. Two textures, alternating.
+ * Black bands here means most of each band dark (a 3 x 12 grid): on the
+ * Switch, whose loads are slower, the loading screen's circle stayed in a
+ * band longer than 4-5 frames and still nudged the picture. */
 static GLuint s_fs_prog, s_fs_tex[2], s_fs_fbo[2];
-static GLint  s_fs_full, s_fs_band;
+static volatile int s_fs_freeze;
+
+/* While > 0 the steady fill keeps its decision: a title's loading screen
+ * (its thread's loop) brings a circle in and out over the picture, and on
+ * the Switch that still nudged the size of what is behind it (2026-11-02).
+ * Any thread. */
+void nv2a_gl_fill_freeze(int delta)
+{
+    __atomic_add_fetch(&s_fs_freeze, delta, __ATOMIC_RELAXED);
+}
+static GLint  s_fs_full, s_fs_band, s_fs_bandw;
 static int    s_fs_cur, s_fs_on = -1;
 
 static int fill_steady_init(void)
@@ -5700,15 +5713,25 @@ static int fill_steady_init(void)
         "#version 330 core\n"
         "uniform sampler2D u_tex, u_state;\n"
         "uniform vec4 u_full;\n"
-        "uniform vec2 u_band;\n"
+        "uniform vec2 u_band;          /* band centres */\n"
+        "uniform float u_bandw;        /* band width */\n"
         "out vec4 o;\n"
+        "/* Black bands: at most a third of a 3 x 12 grid in each band lit. A\n"
+        " * loading screen's circle crossing into a band lights a few points;\n"
+        " * a picture that really spans the width, most of them. */\n"
         "bool bars() {\n"
-        "    for (int k = 0; k < 8; k++) {\n"
-        "        float v = mix(u_full.z, u_full.w, (float(k) + 0.5) / 8.0);\n"
-        "        vec3 a = texture(u_tex, vec2(u_band.x, v)).rgb, b = texture(u_tex, vec2(u_band.y, v)).rgb;\n"
-        "        if (max(max(a.r, a.g), max(a.b, max(b.r, max(b.g, b.b)))) > 0.008) return false;\n"
+        "    int lit = 0;\n"
+        "    for (int k = 0; k < 12; k++) {\n"
+        "        float v = mix(u_full.z, u_full.w, (float(k) + 0.5) / 12.0);\n"
+        "        for (int c = -1; c <= 1; c++) {\n"
+        "            float du = float(c) * 0.3 * u_bandw;\n"
+        "            vec3 a = texture(u_tex, vec2(u_band.x + du, v)).rgb;\n"
+        "            vec3 b = texture(u_tex, vec2(u_band.y + du, v)).rgb;\n"
+        "            if (max(a.r, max(a.g, a.b)) > 0.008) lit++;\n"
+        "            if (max(b.r, max(b.g, b.b)) > 0.008) lit++;\n"
+        "        }\n"
         "    }\n"
-        "    return true;\n"
+        "    return lit <= 24;                 /* of 72 */\n"
         "}\n"
         "void main() {\n"
         "    float s = texture(u_state, vec2(0.5)).r + (bars() ? 0.125 : -0.125);\n"
@@ -5739,6 +5762,7 @@ static int fill_steady_init(void)
     if (!ok) { glDeleteProgram(s_fs_prog); s_fs_prog = 0; s_fs_on = 0; return 0; }
     s_fs_full = glGetUniformLocation(s_fs_prog, "u_full");
     s_fs_band = glGetUniformLocation(s_fs_prog, "u_band");
+    s_fs_bandw = glGetUniformLocation(s_fs_prog, "u_bandw");
     glUseProgram(s_fs_prog);
     glUniform1i(glGetUniformLocation(s_fs_prog, "u_tex"), 0);
     glUniform1i(glGetUniformLocation(s_fs_prog, "u_state"), 1);
@@ -5761,15 +5785,19 @@ static int fill_steady_init(void)
 
 /* This frame's step of the counter; afterwards s_fs_tex[s_fs_cur] holds it.
  * Leaves the default framebuffer unbound: the caller binds its own. */
-static void fill_steady_pass(GLuint frame_tex, const float full[4], const float band[2])
+static void fill_steady_pass(GLuint frame_tex, const float full[4], const float band[2],
+                             float bandw)
 {
     int nxt = s_fs_cur ^ 1;
+    if (__atomic_load_n(&s_fs_freeze, __ATOMIC_RELAXED) > 0)
+        return;                         /* frozen: s_fs_tex[s_fs_cur] stands */
     glBindFramebuffer(GL_FRAMEBUFFER, s_fs_fbo[nxt]);
     glViewport(0, 0, 1, 1);
     glUseProgram(s_fs_prog);
     s_cur_prog = s_fs_prog;
     glUniform4fv(s_fs_full, 1, full);
     glUniform2fv(s_fs_band, 1, band);
+    glUniform1f(s_fs_bandw, bandw);
     active_unit(0);
     bind_tex(frame_tex);
     active_unit(1);
@@ -5903,7 +5931,7 @@ static int present_fxaa(GlSurf *s, GLint sw, int dx, int dy, int dw, int dh)
     {
         int steady = fill && fill_steady_init();
         if (steady) {
-            fill_steady_pass(s->tex, full, band);
+            fill_steady_pass(s->tex, full, band, 2.0f * band[0]);   /* band[0]: half a band */
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
             glViewport(dx, dy, dw, dh);
             glUseProgram(s_fx_prog);
