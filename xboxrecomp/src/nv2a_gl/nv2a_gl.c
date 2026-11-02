@@ -5514,6 +5514,7 @@ void nv2a_gl_fill_hold(int delta)
 }
 
 static GLint  s_fx_rcp, s_fx_max, s_fx_sharp, s_fx_full, s_fx_crop, s_fx_band, s_fx_fill;
+static GLint  s_fx_steady;
 static float  s_fx_sharpness = -1.0f;
 static int    s_fx_on = -1;
 
@@ -5537,6 +5538,8 @@ static int fxaa_init(void)
         "uniform vec4 u_crop;          /* ... its 4:3 middle, filled to 16:9 */\n"
         "uniform vec2 u_band;          /* u of the left and right side bands */\n"
         "uniform int u_fill;\n"
+        "uniform int u_steady;         /* the fill decided by u_state, not this frame */\n"
+        "uniform sampler2D u_state;    /* 1x1: >= 0.5 filled (fill_steady_pass) */\n"
         "in vec2 vT;\n"
         "out vec4 o;\n"
         "vec3 S(vec2 p) { return texture(u_tex, clamp(p, 0.5 * u_rcp, u_max)).rgb; }\n"
@@ -5553,7 +5556,8 @@ static int fxaa_init(void)
         "    return true;\n"
         "}\n"
         "void main() {\n"
-        "    vec4 R = (u_fill != 0 && bars()) ? u_crop : u_full;\n"
+        "    bool filled = u_steady != 0 ? texture(u_state, vec2(0.5)).r >= 0.5 : bars();\n"
+        "    vec4 R = (u_fill != 0 && filled) ? u_crop : u_full;\n"
         "    vec2 uv = vec2(mix(R.x, R.y, vT.x), mix(R.z, R.w, vT.y)), r = u_rcp;\n"
         "    vec3 cM = S(uv);\n"
         "    float m = L(cM);\n"
@@ -5661,11 +5665,133 @@ static int fxaa_init(void)
         s_fx_sharpness = k > 0.0f ? -1.0f / (8.0f + (5.0f - 8.0f) * k) : 0.0f;
         fprintf(stderr, "  [GL] sharpening %g (RECOMP_GL_SHARPEN)\n", k);
     }
+    s_fx_steady = glGetUniformLocation(s_fx_prog, "u_steady");
     glUseProgram(s_fx_prog);
     glUniform1i(glGetUniformLocation(s_fx_prog, "u_tex"), 0);
+    glUniform1i(glGetUniformLocation(s_fx_prog, "u_state"), 1);
     s_cur_prog = s_fx_prog;
     glGenVertexArrays(1, &s_fx_vao);
     return 1;
+}
+
+/* ── A steady 4:3 fill (RECOMP_GL_FILL_STEADY=1, off by default) ──
+ *
+ * The present filled a frame to 16:9 whenever its side bands were black,
+ * decided frame by frame. A loading screen whose art or transition touched
+ * a band for a frame or two jumped between filled and not: what sits behind
+ * the circles "zoomed in for a moment", worse on the Switch where frames
+ * last longer (2026-11-02). Here the decision is a counter in a 1x1 texture
+ * the GPU updates each frame -- a step towards 1 for black bands, towards 0
+ * otherwise -- and the present fills while it is >= 0.5: a change has to
+ * hold for 4-5 frames. No readback, so no stall. Two textures, alternating. */
+static GLuint s_fs_prog, s_fs_tex[2], s_fs_fbo[2];
+static GLint  s_fs_full, s_fs_band;
+static int    s_fs_cur, s_fs_on = -1;
+
+static int fill_steady_init(void)
+{
+    static const char *vs[1] = {
+        "#version 330 core\n"
+        "void main() {\n"
+        "    vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));\n"
+        "    gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n"
+        "}\n" };
+    static const char *fs[1] = {
+        "#version 330 core\n"
+        "uniform sampler2D u_tex, u_state;\n"
+        "uniform vec4 u_full;\n"
+        "uniform vec2 u_band;\n"
+        "out vec4 o;\n"
+        "bool bars() {\n"
+        "    for (int k = 0; k < 8; k++) {\n"
+        "        float v = mix(u_full.z, u_full.w, (float(k) + 0.5) / 8.0);\n"
+        "        vec3 a = texture(u_tex, vec2(u_band.x, v)).rgb, b = texture(u_tex, vec2(u_band.y, v)).rgb;\n"
+        "        if (max(max(a.r, a.g), max(a.b, max(b.r, max(b.g, b.b)))) > 0.008) return false;\n"
+        "    }\n"
+        "    return true;\n"
+        "}\n"
+        "void main() {\n"
+        "    float s = texture(u_state, vec2(0.5)).r + (bars() ? 0.125 : -0.125);\n"
+        "    o = vec4(clamp(s, 0.0, 1.0));\n"
+        "}\n" };
+    static const uint8_t full[4] = { 255, 255, 255, 255 };   /* start filled */
+    GLuint v, f;
+    GLint ok = 0;
+    int i;
+    if (s_fs_on >= 0)
+        return s_fs_on;
+    {
+        const char *e = getenv("RECOMP_GL_FILL_STEADY");
+        s_fs_on = e && e[0] == '1';
+    }
+    if (!s_fs_on)
+        return 0;
+    v = compile(GL_VERTEX_SHADER, vs, 1);
+    f = compile(GL_FRAGMENT_SHADER, fs, 1);
+    if (!v || !f) { s_fs_on = 0; return 0; }
+    s_fs_prog = glCreateProgram();
+    glAttachShader(s_fs_prog, v);
+    glAttachShader(s_fs_prog, f);
+    glLinkProgram(s_fs_prog);
+    glDeleteShader(v);
+    glDeleteShader(f);
+    glGetProgramiv(s_fs_prog, GL_LINK_STATUS, &ok);
+    if (!ok) { glDeleteProgram(s_fs_prog); s_fs_prog = 0; s_fs_on = 0; return 0; }
+    s_fs_full = glGetUniformLocation(s_fs_prog, "u_full");
+    s_fs_band = glGetUniformLocation(s_fs_prog, "u_band");
+    glUseProgram(s_fs_prog);
+    glUniform1i(glGetUniformLocation(s_fs_prog, "u_tex"), 0);
+    glUniform1i(glGetUniformLocation(s_fs_prog, "u_state"), 1);
+    s_cur_prog = s_fs_prog;
+    glGenTextures(2, s_fs_tex);
+    glGenFramebuffers(2, s_fs_fbo);
+    for (i = 0; i < 2; i++) {
+        glBindTexture(GL_TEXTURE_2D, s_fs_tex[i]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, full);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        tex_param_forget(s_fs_tex[i]);
+        glBindFramebuffer(GL_FRAMEBUFFER, s_fs_fbo[i]);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, s_fs_tex[i], 0);
+    }
+    tex_bind_forget();
+    fprintf(stderr, "  [GL] 4:3 fill changes only after 4-5 frames (RECOMP_GL_FILL_STEADY)\n");
+    return 1;
+}
+
+/* This frame's step of the counter; afterwards s_fs_tex[s_fs_cur] holds it.
+ * Leaves the default framebuffer unbound: the caller binds its own. */
+static void fill_steady_pass(GLuint frame_tex, const float full[4], const float band[2])
+{
+    int nxt = s_fs_cur ^ 1;
+    glBindFramebuffer(GL_FRAMEBUFFER, s_fs_fbo[nxt]);
+    glViewport(0, 0, 1, 1);
+    glUseProgram(s_fs_prog);
+    s_cur_prog = s_fs_prog;
+    glUniform4fv(s_fs_full, 1, full);
+    glUniform2fv(s_fs_band, 1, band);
+    active_unit(0);
+    bind_tex(frame_tex);
+    active_unit(1);
+    bind_tex(s_fs_tex[s_fs_cur]);
+    active_unit(0);
+    glBindVertexArray(s_fx_vao);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    s_fs_cur = nxt;
+    {   /* RECOMP_GL_FILL_TRACE=1: the counter once a second (a stalling read) */
+        static int tr = -1;
+        static uint64_t last;
+        if (tr < 0) {
+            const char *e = getenv("RECOMP_GL_FILL_TRACE");
+            tr = e && e[0] == '1';
+        }
+        if (tr && hz_now() - last > 1000000000ull) {
+            uint8_t px[4] = { 0 };
+            last = hz_now();
+            glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+            fprintf(stderr, "  [GL] fill counter %.3f (%s)\n", px[0] / 255.0, px[0] >= 128 ? "filled" : "as framed");
+        }
+    }
 }
 
 /* The present pass's program, compiled before the title draws (prepare):
@@ -5774,6 +5900,19 @@ static int present_fxaa(GlSurf *s, GLint sw, int dx, int dy, int dw, int dh)
     }
     glUniform2fv(s_fx_max, 1, mx);
     glUniform1f(s_fx_sharp, -s_fx_sharpness);   /* 1 / mix(8, 5, k); 0 = off */
+    {
+        int steady = fill && fill_steady_init();
+        if (steady) {
+            fill_steady_pass(s->tex, full, band);
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            glViewport(dx, dy, dw, dh);
+            glUseProgram(s_fx_prog);
+            s_cur_prog = s_fx_prog;
+            active_unit(1);
+            bind_tex(s_fs_tex[s_fs_cur]);
+        }
+        glUniform1i(s_fx_steady, steady);
+    }
     active_unit(0);
     bind_tex(s->tex);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
