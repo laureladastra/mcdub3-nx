@@ -28,4 +28,6 @@
     X("RECOMP_GL_CUBO", "1")          /* constants through a uniform buffer */ \
     X("RECOMP_GL_LEAN", "0")          /* uniforms all re-sent at a change: played better (2026-10-29) */ \
     X("RECOMP_GL_SMALL_SCALE", "1")   /* effect buffers at 1x: 1.5 cost 6 ms more GPU */ \
+    X("MC3_REALTIME", "1")            /* races in real time below 30 fps: steadier (2026-11-02) */ \
+    X("RECOMP_GL_EDGE_TRIM", "2")     /* the race frame's last columns: streaks at the right edge */ \
     X("RECOMP_GL_SHARPEN", "0.5")     /* CAS on, as the DUB Edition: played better (2026-10-29) */
