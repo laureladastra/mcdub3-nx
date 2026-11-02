@@ -1082,6 +1082,7 @@ void sub_0001BC10(void)
  * other loading screens and ends before some of them do, so they started
  * at 4:3 and switched to 16:9 halfway (2026-10-20). */
 extern void nv2a_gl_fill_hold(int delta) __attribute__((weak));
+extern void nv2a_gl_fill_freeze(int delta) __attribute__((weak));   /* RECOMP_GL_FILL_STEADY */
 extern void sub_0001B9D0_gen(void);
 static RECOMP_TLS int t_ls_thread;          /* this is the loading-screen thread */
 void sub_0001B9D0(void)
@@ -1091,7 +1092,11 @@ void sub_0001B9D0(void)
     if (hold)
         nv2a_gl_fill_hold(1);
     t_ls_thread = 1;
+    if (nv2a_gl_fill_freeze)
+        nv2a_gl_fill_freeze(1);             /* the circle's in and out: no change of size */
     sub_0001B9D0_gen();
+    if (nv2a_gl_fill_freeze)
+        nv2a_gl_fill_freeze(-1);
     t_ls_thread = 0;
     if (hold)
         nv2a_gl_fill_hold(-1);
