@@ -1723,7 +1723,7 @@ void sub_00020B60(void)
         fprintf(stderr, "[STATE] %u -> %u\n", before, MEM32(obj + 4));
 }
 
-/* ── Races in real time below 30 fps (MC3_REALTIME=1, opt-in) ──
+/* ── Races in real time below 30 fps (MC3_REALTIME, on by default) ──
  *
  * The frame step (sub_001EDBE0) runs in a fixed-step mode in races
  * (0x4FCF39 / 0x4FCF3C set): every frame advances by 0x47C3EC = 1/30 s
@@ -1734,7 +1734,9 @@ void sub_00020B60(void)
  * up to MC3_MAX_DT (0.0667 s), through the variables the fixed path writes:
  * 0x47C404 (step), 0x47C3DC / 0x47C3E0 (scaled, clamped to [0x47C3F4,
  * 0x47C3F0]), 0x47C3E4 (reciprocal), 0x4FCF28 (game time). 1/30 steps only.
- * MC3_TIME_TRACE=1: the steps once a second. */
+ * MC3_TIME_TRACE=1: the steps once a second. On by default since
+ * 2026-11-02, as in the Remix (config/dub/game.h); MC3_REALTIME=0 in
+ * mcdub3_env.txt goes back to fixed steps. */
 extern void sub_001EDBE0_gen(void);
 void sub_001EDBE0(void)
 {
