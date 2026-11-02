@@ -2196,6 +2196,37 @@ void sub_003AD0F0(void) { abi_call(sub_003AD0F0_gen, "sub_003AD0F0"); }
 extern void sub_002DBBC0_gen(void);
 void sub_002DBBC0(void) { abi_call(sub_002DBBC0_gen, "sub_002DBBC0"); }
 
+/* ── Real-time steps below 30 fps ──
+ *
+ * The game measures each frame with the CPU's cycle counter (sub_0020B6F0:
+ * rdtsc at 733 MHz) and clamps the step to [0x4B2D60, 0x4B2D5C]. The race
+ * setup (sub_00020880) sets the maximum to 1 / its rate -- 1/30 s -- so on
+ * the Xbox, which held 30 fps, nothing moved slower than real time. On the
+ * Switch the Remix drops below 30 in rain, with nitrous and in dense parts of
+ * the city, and every such frame advanced the world by only 1/30 s: slow
+ * motion, the car "slowing down" (2026-10-30; the perf report's game frame
+ * time stayed 0.0333 at 19 fps). The engine's own fallback without a rate is
+ * 0.1 s, so steps up to MC3_MAX_DT (default 0.0667, 15 fps) keep the race at
+ * its real speed with fewer frames. MC3_MAX_DT=0: the game's own cap. */
+extern void sub_00020880_gen(void);
+void sub_00020880(void)
+{
+    static float cap = -1.0f;
+    static int logged;
+    sub_00020880_gen();
+    if (cap < 0.0f) {
+        const char *e = getenv("MC3_MAX_DT");
+        cap = e ? (float)atof(e) : 0.0667f;
+        if (cap > 0.1f) cap = 0.1f;            /* the engine's own limit */
+    }
+    if (cap > 0.0f && MEMF(0x004B2D5Cu) < cap) {
+        if (logged++ < 4)
+            fprintf(stderr, "[TIME] frame step capped at %.4f s by the game; %.4f s here (MC3_MAX_DT)\n",
+                    MEMF(0x004B2D5Cu), cap);
+        MEMF(0x004B2D5Cu) = cap;
+    }
+}
+
 /* ── DirectSound: stopping a voice while the APU waits for us ──
  *
  * sub_003C77C0 waits for a voice to stop: while the voice's flags (+0x12)
