@@ -2090,6 +2090,17 @@ static void rt_edge_fill(GlSurf *rt, uint32_t w, uint32_t h)
         || rt->aa_sx > 1 || rt->aa_sy > 1)         /* anti-aliased: sizes differ by design */
         return;
     rt->eseq = rt->wseq;
+    if (on == 1) {                      /* first fill of each (surface, size): logged */
+        static uint32_t seen[32][3];
+        static int nseen;
+        int k;
+        for (k = 0; k < nseen && !(seen[k][0] == rt->va && seen[k][1] == w && seen[k][2] == h); k++) { }
+        if (k == nseen && nseen < 32) {
+            seen[nseen][0] = rt->va; seen[nseen][1] = w; seen[nseen][2] = h; nseen++;
+            fprintf(stderr, "  [GL] edge fill: surface %08X %ux%u (shown %u wide) sampled as %ux%u\n",
+                    rt->va, rt->w, rt->h, rt->vw, w, h);
+        }
+    }
     sx = w < rt->w ? (uint32_t)((uint64_t)rt->pw * w / rt->w) : rt->pw;
     sy = h < rt->h ? (uint32_t)((uint64_t)rt->ph * h / rt->h) : rt->ph;
     if (!sx || !sy)
