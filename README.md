@@ -261,10 +261,7 @@ described in the example file and in the source.
 
 ## License
 
-The project's own code is under the MIT license ([LICENSE](LICENSE)). The
-vendored toolkit in `xboxrecomp/` keeps its own license
-([xboxrecomp/LICENSE](xboxrecomp/LICENSE), third-party parts in
-`xboxrecomp/LICENSES/`). No game code or data is part of this repository.
+The project's own code is under the MIT license ([LICENSE](LICENSE)). The vendored toolkit in `xboxrecomp/` keeps its own license ([xboxrecomp/LICENSE](xboxrecomp/LICENSE), third-party parts in `xboxrecomp/LICENSES/`). No game code or data is part of this repository.
 
 ## Legal
 
