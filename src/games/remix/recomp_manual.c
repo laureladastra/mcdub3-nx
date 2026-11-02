@@ -2227,6 +2227,93 @@ void sub_00020880(void)
     }
 }
 
+/* MC3_TIME_TRACE=1: the game's frame step (sub_0020B6F0 -> 0x4B2D70), once
+ * a second: steps taken, their shortest / mean / longest, the clamp
+ * [0x4B2D60, 0x4B2D5C] and the mode flags that pick how the step is made
+ * (0x534774-76 snapping and fixed steps, 0x534AC4 / 0x534A9C replay). */
+/* MC3_REALTIME=1 (off by default): in a race the game runs fixed steps --
+ * 0x534770 set, the step 0x4B2D58 = 1/30 s written whatever the frame took
+ * (0x0020B942) -- so below 30 fps the race is slow motion (trace above,
+ * 2026-11-02: 0.0167 s a step at 4 fps in the flythrough, 0.0333 in races
+ * at 18 fps). With it, a race frame that took longer advances by the real
+ * time, up to MC3_MAX_DT (0.0667 s), through the same variables the fixed
+ * path writes: 0x4B2D70 (step), 0x4B2D4C (scaled), 0x53475C (game time),
+ * 0x4B2D48 (clamped) and 0x4B2D50 (its reciprocal). Only steps of 1/30
+ * (races); the title flythrough's 1/60 half-speed showcase is left alone.
+ * Replays recorded this way may play back slightly differently. */
+static void realtime_step(float real)
+{
+    static int on = -1;
+    static float cap;
+    float f = MEMF(0x004B2D58u), scale = MEMF(0x004B2D6Cu), d, cl;
+    if (on < 0) {
+        const char *e = getenv("MC3_REALTIME"), *c = getenv("MC3_MAX_DT");
+        on = e && e[0] == '1';
+        cap = c && atof(c) > 0.0 ? (float)atof(c) : 0.0667f;
+        if (cap > 0.1f) cap = 0.1f;
+        if (on)
+            fprintf(stderr, "[TIME] races advance in real time below 30 fps, steps up to %.4f s"
+                    " (MC3_REALTIME)\n", cap);
+    }
+    if (!on || MEM32(0x00534770u) == 0 || f < 0.030f || f > 0.037f || real <= f * 1.1f)
+        return;
+    d = real < cap ? real : cap;
+    MEMF(0x004B2D70u) = d;
+    MEMF(0x0053475Cu) += (d - f) * scale;           /* game time: the real step, not f */
+    MEMF(0x004B2D4Cu) = d * scale;
+    cl = d * scale;
+    if (cl < MEMF(0x004B2D60u)) cl = MEMF(0x004B2D60u);
+    if (cl > MEMF(0x004B2D5Cu)) cl = MEMF(0x004B2D5Cu);
+    MEMF(0x004B2D48u) = cl;
+    MEMF(0x004B2D50u) = 1.0f / cl;
+}
+
+extern void sub_0020B6F0_gen(void);
+void sub_0020B6F0(void)
+{
+    static int on = -1;
+    static unsigned n;
+    static float lo = 1e9f, hi = 0.0f, sum = 0.0f;
+    static uint32_t last_ms;
+    static uint64_t last_ns;
+    float dt, real;
+    if (on < 0) {
+        const char *e = getenv("MC3_TIME_TRACE");
+        on = e && e[0] == '1';
+    }
+    {
+        struct timespec ts;
+        uint64_t now;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        now = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+        real = last_ns ? (float)((now - last_ns) / 1e9) : 0.0f;
+        last_ns = now;
+    }
+    sub_0020B6F0_gen();
+    realtime_step(real);
+    if (!on)
+        return;
+    dt = MEMF(0x004B2D70u);
+    n++; sum += dt;
+    if (dt < lo) lo = dt;
+    if (dt > hi) hi = dt;
+    {
+        struct timespec ts;
+        uint32_t ms;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        ms = (uint32_t)(ts.tv_sec * 1000u + ts.tv_nsec / 1000000u);
+        if (ms - last_ms >= 1000u) {
+            fprintf(stderr, "[TIME] %u steps/s, step %.4f .. %.4f (mean %.4f) s; fixed step %.4f;"
+                    " clamp %.4f .. %.4f; flags snap %u fixed %u/%u/%08X replay %08X/%u\n",
+                    n, lo, hi, n ? sum / n : 0.0f, MEMF(0x004B2D58u), MEMF(0x004B2D60u), MEMF(0x004B2D5Cu),
+                    MEM8(0x00534776u), MEM8(0x00534774u), MEM8(0x00534775u), MEM32(0x00534770u),
+                    MEM32(0x00534AC4u), MEM8(0x00534A9Cu));
+            n = 0; sum = 0.0f; lo = 1e9f; hi = 0.0f;
+            last_ms = ms;
+        }
+    }
+}
+
 /* ── DirectSound: stopping a voice while the APU waits for us ──
  *
  * sub_003C77C0 waits for a voice to stop: while the voice's flags (+0x12)
