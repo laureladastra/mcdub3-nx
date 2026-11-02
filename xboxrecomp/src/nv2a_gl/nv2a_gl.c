@@ -278,6 +278,7 @@ typedef struct {
     GLuint   ds_on;                     /* depth renderbuffer attached now */
     uint32_t used;
     uint32_t aa_sx, aa_sy;
+    uint32_t wseq, eseq;                /* drawn into / edge filled (rt_edge_fill) */
 } GlSurf;
 
 /* Depth buffers belong to the title's zeta address, not to a colour surface:
@@ -571,6 +572,7 @@ static GlSurf *surf_bind(const Nv2aSurface *sf, uint32_t zeta_va)
         glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
     }
     glViewport(0, 0, (GLsizei)s->pw, (GLsizei)s->ph);
+    s->wseq++;                          /* drawn into from here (rt_edge_fill) */
     s_last = s;
     return s;
 }
@@ -2064,6 +2066,47 @@ static GLuint s_movie_tex[4];              /* ... that sample an upscaled movie 
 
 /* Before a draw binds its surface: convert the zeta buffers its stages
  * sample (depth_as_color), which uses its own framebuffer and program. */
+/* RECOMP_GL_RT_EDGE=1 (off by default; a title turns it on in its own
+ * defaults): a surface sampled as a texture smaller than its storage -- the
+ * Remix's frame, 720 title columns in a 768-wide buffer -- gets the strip
+ * right of and below the sampled image filled with copies of its last
+ * column and row. The title's speed blur samples its frame at offsets that
+ * grow with speed; on the Xbox the texture ends at the image and clamps,
+ * here the samples ran into the strip (black, or what other passes left)
+ * and smeared it in as white vertical lines at the picture's edges (bugs
+ * 46, 47, 2026-11-02). Done before the draw binds its target, once per
+ * change of the surface. */
+static void rt_edge_fill(GlSurf *rt, uint32_t w, uint32_t h)
+{
+    static int on = -1;
+    uint32_t sx, sy;
+    if (on < 0) {
+        const char *e = getenv("RECOMP_GL_RT_EDGE");
+        on = e && e[0] == '1';
+        if (on)
+            fprintf(stderr, "  [GL] sampled frames clamped at their image's edge (RECOMP_GL_RT_EDGE)\n");
+    }
+    if (!on || rt->eseq == rt->wseq || !rt->fbo || (w >= rt->w && h >= rt->h)
+        || rt->aa_sx > 1 || rt->aa_sy > 1)         /* anti-aliased: sizes differ by design */
+        return;
+    rt->eseq = rt->wseq;
+    sx = w < rt->w ? (uint32_t)((uint64_t)rt->pw * w / rt->w) : rt->pw;
+    sy = h < rt->h ? (uint32_t)((uint64_t)rt->ph * h / rt->h) : rt->ph;
+    if (!sx || !sy)
+        return;
+    glDisable(GL_SCISSOR_TEST);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, rt->fbo);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, rt->fbo);
+    if (sx < rt->pw)                    /* the last column, across the strip */
+        glBlitFramebuffer((GLint)sx - 1, 0, (GLint)sx, (GLint)sy, (GLint)sx, 0,
+                          (GLint)rt->pw, (GLint)sy, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    if (sy < rt->ph)                    /* the last row, below (the corner too) */
+        glBlitFramebuffer(0, (GLint)sy - 1, (GLint)rt->pw, (GLint)sy, 0, (GLint)sy,
+                          (GLint)rt->pw, (GLint)rt->ph, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    glBindFramebuffer(GL_FRAMEBUFFER, rt->fbo);
+    state_dirty();
+}
+
 static void depth_tex_prepare(const uint32_t *regs, const Nv2aRawBatch *b)
 {
     int i;
@@ -2072,9 +2115,19 @@ static void depth_tex_prepare(const uint32_t *regs, const Nv2aRawBatch *b)
         const GlDepth *d = NULL;
         s_depth_tex[i] = NULL;
         s_movie_tex[i] = 0;
-        if (!(regs[base + 3] & 0x40000000u) || !regs[base] || !b->tex_va[i]
-            || surf_find(b->tex_va[i]))
+        if (!(regs[base + 3] & 0x40000000u) || !regs[base] || !b->tex_va[i])
             continue;
+        {
+            GlSurf *rt = surf_find(b->tex_va[i]);
+            if (rt) {
+                uint32_t color = (regs[base + 1] >> 8) & 0xFF;
+                if (!tex_size_from_format(color)) {         /* linear: its own size */
+                    uint32_t rect = regs[base + 7];
+                    rt_edge_fill(rt, rect >> 16, rect & 0xFFFF);
+                }
+                continue;
+            }
+        }
         if (s_mv.active
             && (s_movie_tex[i] = movie_prepare(b->tex_va[i], (regs[base + 1] >> 8) & 0xFF)) != 0)
             continue;
