@@ -1,11 +1,11 @@
 # Release notes
 
-## Unreleased
+## v1.1.0
 
 ### Features
 
 - **Headlight beams.** At night your car's headlights light up the road ahead again, in both games. They were missing entirely before (and show as a white blob in other emulators): the game builds the beam in a small hidden picture using two tricks of the Xbox's graphics chip that the port did not reproduce yet.
-- **Android.** Both games can be installed as an app on Android (sideloaded, you supply the disc). A start screen lets you pick your game folder, including the one the Switch version already uses, and choose whether the on-screen gamepad shows. Controllers and keyboards work too.
+- **Android (beta, app version 0.1.0).** The DUB Edition can be installed as an app on Android (sideloaded, you supply the disc): `mcdub3-0.1.0.apk`. A start screen lets you pick your game folder, including the one the Switch version already uses, and choose whether the on-screen gamepad shows. Controllers and keyboards work too. Tested on a Switch running Android; please report how it runs on phones.
 
 ## v1.0.0
 
