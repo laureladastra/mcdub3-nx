@@ -722,14 +722,16 @@ releases ([ADR 0005](docs/decisions/0005-switch-releases.md)).
   `MC3_KEYS` no longer needs either.
 
   Run it as a service (`sudo ./svc.sh install && sudo ./svc.sh start`). Each
-  build lifts the disc again in a work folder beside the checkout
-  (`mcdub3-work-<game>-<edition>`, kept between runs: Python venv, build
-  trees; the older `mcdub3-work-<edition>` folders can be deleted).
+  build lifts each game's disc again in a work folder beside the checkout
+  (`mcdub3-work-<game>`, kept between runs: Python venv, build trees; the
+  older `mcdub3-work-<game>-<edition>` and `mcdub3-work-<edition>` folders
+  can be deleted).
 - *Editions*: `config/<game>/xbe_facts.h` names the disc this lift was made from
   (`MC3_EDITION`, from the XBE's region), `config/<game>/xbe_editions.h` every
   edition whose code is the same (usa, eur); the NRO refuses any other
-  `default.xbe` with a message. The build matrix builds one NRO per edition
-  of each game (`make switch GAME=<game> EDITION=<edition>`:
+  `default.xbe` with a message. The build runs a job per game, which lifts
+  and compiles once and then packages one NRO per edition
+  (`make switch GAME=<game> EDITION=<edition>`:
   <sd folder>-<edition>.nro, looking in `game-<edition>/` on the card
   first, then `game/`), all from the lifted disc, so the runner needs only
   that one per game in `MC3_DISCS`. Editions whose code differs in branch

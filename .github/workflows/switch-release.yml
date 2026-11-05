@@ -135,7 +135,7 @@ jobs:
         with:
           run-id: ${{ steps.build.outputs.run_id }}
           github-token: ${{ github.token }}
-          pattern: mcdub3*-nx-*         # mcdub3-nx-<v>-<edition> (DUB Edition), mcdub3remix-nx-... (Remix)
+          pattern: mcdub3*-nx-*         # mcdub3-nx-<v> (DUB Edition), mcdub3remix-nx-<v> (Remix): every edition's NRO in each
           path: ${{ runner.temp }}/build
 
       - name: Check the NROs

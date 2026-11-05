@@ -3,8 +3,15 @@
 # workflow); release a build with switch-release.yml.
 #
 # Which NROs: every edition in APP_EDITIONS of every game's
-# config/<game>/app.env (the DUB Edition: usa, eur; the Remix: eur), so a
-# new edition needs no change here. All games share one version.
+# config/<game>/app.env (the DUB Edition: usa, eur; the Remix: eur, usa), so
+# a new edition needs no change here. All games share one version.
+#
+# One job per game: the editions of a game share its lift (only the package
+# differs: edition, title ID, NRO name), so it lifts and compiles once and
+# then packages each edition, which recompiles a file or two and relinks
+# (~7 min + ~1 per edition, where a job per edition took ~7 min each). One
+# artifact per game, <package>-<version>, holding every edition's NRO, ELF
+# and .buildinfo side by side (switch-release.yml checks each .buildinfo).
 #
 # The NRO is built from the lifted code of the disc's default.xbe, so the
 # build stage runs on a self-hosted runner that has the discs (labels
@@ -58,13 +65,18 @@ jobs:
             || { echo "::error::the games' APP_VERSION differ ($versions): one release carries all of them"; exit 1; }
           python3 - "$RUNNER_TEMP/plan" >> "$GITHUB_OUTPUT" <<'PY'
           import json, sys
-          rows = [l.split() for l in open(sys.argv[1]) if l.strip()]
-          print("matrix=" + json.dumps({"include": [{"game": g, "edition": e} for g, e in rows]}))
+          games = {}
+          for line in open(sys.argv[1]):
+              if line.strip():
+                  g, e = line.split()
+                  games.setdefault(g, []).append(e)
+          print("matrix=" + json.dumps({"include": [{"game": g, "editions": " ".join(es)}
+                                                    for g, es in games.items()]}))
           PY
           cat "$RUNNER_TEMP/plan"
 
   build:
-    name: NRO (${{ matrix.game }} ${{ matrix.edition }})
+    name: "NROs (${{ matrix.game }}: ${{ matrix.editions }})"
     needs: [tests, plan]
     runs-on: [self-hosted, mcdub3-disc]
     timeout-minutes: 240
@@ -79,8 +91,9 @@ jobs:
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     env:
       GAME: ${{ matrix.game }}
+      EDITIONS: ${{ matrix.editions }}
       # Kept between runs on the runner: the Python venv and build trees.
-      MC3_WORK: ${{ github.workspace }}/../mcdub3-work-${{ matrix.game }}-${{ matrix.edition }}
+      MC3_WORK: ${{ github.workspace }}/../mcdub3-work-${{ matrix.game }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -95,7 +108,7 @@ jobs:
           echo "version=$APP_VERSION" >> "$GITHUB_OUTPUT"
           echo "package=$MC3_SD_DIR_DEFAULT" >> "$GITHUB_OUTPUT"
           echo "build_id=$APP_VERSION+${{ github.run_number }}.${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
-          echo "Building $MC3_SD_DIR_DEFAULT $APP_VERSION (${{ matrix.edition }})"
+          echo "Building $MC3_SD_DIR_DEFAULT $APP_VERSION ($EDITIONS)"
 
       - name: Disc
         run: |
@@ -131,13 +144,18 @@ jobs:
           DESCRIPTION: ${{ inputs.description }}       # as data, never as script
           BUILD_ID: ${{ steps.version.outputs.build_id }}
         run: |
-          make switch NO_GAME=1 EDITION="${{ matrix.edition }}" RELEASE_DIR="$RUNNER_TEMP/release" MC3_BUILD_ID="$BUILD_ID"
+          # The first edition compiles the game; the others reuse that build
+          # tree (MC3_WORK) and only repackage.
+          for e in $EDITIONS; do
+            echo "== $GAME $e"
+            make switch NO_GAME=1 EDITION="$e" RELEASE_DIR="$RUNNER_TEMP/release" MC3_BUILD_ID="$BUILD_ID"
+          done
           printf '%s\n' "$DESCRIPTION" > "$RUNNER_TEMP/release/description.txt"
           ls -l "$RUNNER_TEMP/release"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.version.outputs.package }}-${{ steps.version.outputs.version }}-${{ matrix.edition }}
+          name: ${{ steps.version.outputs.package }}-${{ steps.version.outputs.version }}
           path: ${{ runner.temp }}/release/
           retention-days: 90
           if-no-files-found: error
@@ -147,7 +165,7 @@ jobs:
           DESCRIPTION: ${{ inputs.description }}
         run: |
           {
-            echo "### ${{ steps.version.outputs.package }} ${{ steps.version.outputs.version }} (${{ matrix.edition }})"
+            echo "### ${{ steps.version.outputs.package }} ${{ steps.version.outputs.version }} ($EDITIONS)"
             echo
             echo "Build \`${{ steps.version.outputs.build_id }}\`, run ID \`${{ github.run_id }}\`."
             if [ -n "$DESCRIPTION" ]; then echo; echo "$DESCRIPTION"; fi
