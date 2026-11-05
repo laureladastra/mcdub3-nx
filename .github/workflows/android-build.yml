@@ -1,11 +1,13 @@
-# Android build (ADR 0010): tests, then the DUB Edition's APK as a versioned
-# artifact. A beta on every push to main that changes android/ (and by
+# Android build (ADR 0010): tests, then an APK per game (the DUB Edition's
+# mcdub3-*.apk, the Remix's mcdub3remix-*.apk) as versioned artifacts. A beta on every push to main that changes android/ (and by
 # hand, the default); a release build by hand (Actions > Android build >
 # Run workflow, channel: release). Publish it with switch-release.yml
 # ("android"), beside the NROs.
 #
-#   beta      mcdub3-<ANDROID_VERSION>-beta.<run number>.apk
-#   release   mcdub3-<ANDROID_VERSION>.apk
+#   beta      <app>-<ANDROID_VERSION>-beta.<run number>.apk
+#   release   <app>-<ANDROID_VERSION>.apk      (app: mcdub3, mcdub3remix)
+#
+# ANDROID_VERSION is each game's config/<game>/app.env.
 #
 # The APK is built from the lifted code of the disc's default.xbe, so the
 # build runs on the self-hosted runner with the discs (labels self-hosted,
@@ -29,7 +31,7 @@ on:
   workflow_dispatch:
     inputs:
       channel:
-        description: "beta (mcdub3-<version>-beta.<n>.apk) or release (mcdub3-<version>.apk)"
+        description: "beta (<app>-<version>-beta.<n>.apk) or release (<app>-<version>.apk)"
         type: choice
         options: [beta, release]
         default: beta
@@ -50,15 +52,21 @@ jobs:
     uses: ./.github/workflows/ci.yml
 
   build:
-    name: APK (dub, ${{ inputs.channel || 'beta' }})
+    name: APK (${{ matrix.game }}, ${{ inputs.channel || 'beta' }})
     needs: tests
     runs-on: [self-hosted, mcdub3-disc]
     timeout-minutes: 240
+    strategy:
+      # One after the other: both games share android/'s Gradle build tree.
+      max-parallel: 1
+      fail-fast: false
+      matrix:
+        game: [dub, remix]
     env:
-      GAME: dub
+      GAME: ${{ matrix.game }}
       CHANNEL: ${{ inputs.channel || 'beta' }}
       # Kept between runs on the runner: the Python venv, the lift, build trees.
-      MC3_WORK: ${{ github.workspace }}/../mcdub3-work-android-dub
+      MC3_WORK: ${{ github.workspace }}/../mcdub3-work-android-${{ matrix.game }}
       GRADLE_USER_HOME: ${{ github.workspace }}/../gradle-home
     steps:
       - uses: actions/checkout@v4
@@ -78,11 +86,15 @@ jobs:
             beta=""
             label="$v"
           fi
-          echo "version=$v" >> "$GITHUB_OUTPUT"
-          echo "beta=$beta" >> "$GITHUB_OUTPUT"
-          echo "label=$label" >> "$GITHUB_OUTPUT"
-          echo "build_id=$label+${{ github.run_number }}.${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
-          echo "Building mcdub3 $label for Android ($CHANNEL)"
+          app=$([ "$GAME" = remix ] && echo mcdub3remix || echo mcdub3)
+          {
+            echo "app=$app"
+            echo "version=$v"
+            echo "beta=$beta"
+            echo "label=$label"
+            echo "build_id=$label+${{ github.run_number }}.${GITHUB_SHA::7}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Building $app $label for Android ($CHANNEL)"
 
       - name: Runner setup
         run: |
@@ -124,16 +136,18 @@ jobs:
           DESCRIPTION: ${{ inputs.description }}       # as data, never as script
           MC3_BETA: ${{ steps.version.outputs.beta }}
           LABEL: ${{ steps.version.outputs.label }}
+          APP: ${{ steps.version.outputs.app }}
           BUILD_ID: ${{ steps.version.outputs.build_id }}
         run: |
           bash tools/android_build.sh release
-          apk="mcdub3-$LABEL.apk"
+          apk="$APP-$LABEL.apk"
           out="$RUNNER_TEMP/release"
           mkdir -p "$out"
           cp "$MC3_WORK/android/$apk" "$out/"
           # .apkinfo, not .buildinfo: the release checks NROs by their .buildinfo.
           {
-            echo "app=mcdub3"
+            echo "app=$APP"
+            echo "game=$GAME"
             echo "platform=android"
             echo "version=${{ steps.version.outputs.version }}"
             echo "label=$LABEL"
@@ -148,7 +162,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: mcdub3-android-${{ steps.version.outputs.label }}
+          name: ${{ steps.version.outputs.app }}-android-${{ steps.version.outputs.label }}
           path: ${{ runner.temp }}/release/
           retention-days: 90
           if-no-files-found: error
@@ -158,7 +172,7 @@ jobs:
           DESCRIPTION: ${{ inputs.description }}
         run: |
           {
-            echo "### mcdub3 ${{ steps.version.outputs.label }} (Android, $CHANNEL)"
+            echo "### ${{ steps.version.outputs.app }} ${{ steps.version.outputs.label }} (Android, $CHANNEL)"
             echo
             echo "Build \`${{ steps.version.outputs.build_id }}\`, run ID \`${{ github.run_id }}\`."
             if [ -n "$DESCRIPTION" ]; then echo; echo "$DESCRIPTION"; fi
