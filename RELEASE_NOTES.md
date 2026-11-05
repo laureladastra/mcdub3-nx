@@ -2,10 +2,12 @@
 
 ## v1.1.0
 
+**Headlight beams in both games, and the first Android beta.** At night your car finally lights up the road ahead and we're releasing the Android version for further testing.
+
 ### Features
 
-- **Headlight beams.** At night your car's headlights light up the road ahead again, in both games. They were missing entirely before (and show as a white blob in other emulators): the game builds the beam in a small hidden picture using two tricks of the Xbox's graphics chip that the port did not reproduce yet.
-- **Android (beta, app version 0.1.0).** The DUB Edition can be installed as an app on Android (sideloaded, you supply the disc): `mcdub3-0.1.0.apk`. A start screen lets you pick your game folder, including the one the Switch version already uses, and choose whether the on-screen gamepad shows. Controllers and keyboards work too. Tested on a Switch running Android; please report how it runs on phones.
+- **Headlight beams.** Turning your lights on at night now throws a beam of light onto the road ahead, as on the original Xbox: it brightens the street, cars and walls it reaches and stops where it meets them ([#10](https://github.com/laureladastra/mcdub3-nx/issues/10), thanks for the report). Before, the lights worked in the game but no beam was drawn. Other emulators (i.e. xemu → https://github.com/xemu-project/xemu/issues/996) show a solid white shape instead. The game builds the beam in a small hidden picture using two tricks of the Xbox's graphics chip that the port did not reproduce yet: it reuses a picture as a depth map, and it counts the beam's layers with a special blending mode that works with negative numbers. Both are emulated now. Tested in the DUB Edition and the Remix. The WHITE button flashes your high beams while you hold it. The main headlights are on by themselves at night.
+- **Android beta (app version 0.1.0).** Both games can be installed as an Android app: `mcdub3-0.1.0.apk` (DUB Edition) and `mcdub3remix-0.1.0.apk` (Remix). Like on the Switch you bring your own copy of the game.
 
 ## v1.0.0
 
