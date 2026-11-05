@@ -737,6 +737,43 @@ releases ([ADR 0005](docs/decisions/0005-switch-releases.md)).
   other code differences would need a lift of their own (ADR 0005). Each edition's NSP
   has its own title ID and name in `config/<game>/app.env`.
 
+
+## Releases (Android)
+
+The Android app ([ADR 0010](docs/decisions/0010-android-port.md)) has a
+version of its own, `ANDROID_VERSION` in `config/dub/app.env` (0.1.0 while
+it is a beta), apart from the games' `APP_VERSION`.
+
+| Stage | Workflow | Runs on | Started by |
+|---|---|---|---|
+| Build | `android-build.yml` | the self-hosted runner with the disc | every push to `main` that changes `android/` (a beta), or you: Actions > Android build > Run workflow (beta or release) |
+| Release | `switch-release.yml`, **android** on | GitHub | you, with the Switch release |
+
+- A **beta** is `mcdub3-<version>-beta.<run number>.apk`, a **release**
+  `mcdub3-<version>.apk`. Version codes put every beta before its release
+  and the release over its betas, so each installs over the one before.
+- To publish the APK with a Switch release: run Android build with channel
+  **release** first, then Switch release with **android** on (the latest
+  successful Android build, or the run ID in `android_run_id`). Only a
+  release build is taken. The release is then titled "mcdub3-nx.nro
+  v&lt;version&gt; (Nintendo Switch) and mcdub3-&lt;version&gt;.apk (Android)" and
+  carries the APK beside the NROs.
+- Locally the same: `make android-release` (`MC3_BETA=<n>` for a beta).
+
+**The runner** (the one with `mcdub3-disc`) needs, in its `.env`:
+
+```sh
+ANDROID_HOME=/home/<you>/android-sdk        # platforms;android-35, build-tools;35.0.0,
+                                            # ndk;30.0.16248370, cmake;3.31.6
+MC3_SDL_DIR=/home/<you>/SDL2-2.32.10        # SDL2's source (libsdl.org)
+MC3_ANDROID_KEYS=/home/<you>/mcdub3-keys    # android-release.jks + .properties
+```
+
+and Java 17 or newer. `MC3_ANDROID_KEYS` holds a copy of the release key
+from `keys/` (made by the first `make android-release`). It stays on that
+machine, never on GitHub, as a secret or otherwise: every APK update must
+carry the same key, so a runner without it fails rather than make another.
+
 ## Texture packs (HD)
 
 Replacement textures live in `hd/` beside `game/`, never inside it: the

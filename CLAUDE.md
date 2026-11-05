@@ -408,7 +408,9 @@ in nfsu2-sw's README (Configuration section); the toolkit is the same.
   GLES 3.2, else 3.1; a start screen picks the game folder (found in
   mcdub3-nx/ and switch/mcdub3-nx/ on every storage, any edition) and the
   on-screen pad mode; keyboard keys handed to SDL as keys. Plays on a
-  Switch under Android 15. The Android emulator on a Mac (ANGLE, GLES
+  Switch under Android 15. Own version ANDROID_VERSION (0.1.0); CI
+  android-build.yml (beta on pushes to android/), published with a Switch
+  release when "android" is on. The Android emulator on a Mac (ANGLE, GLES
   3.1) is slow for guest-lock hand-overs and movies: judge speed on a
   device.
 

@@ -1,0 +1,167 @@
+# Android build (ADR 0010): tests, then the DUB Edition's APK as a versioned
+# artifact. A beta on every push to main that changes android/ (and by
+# hand, the default); a release build by hand (Actions > Android build >
+# Run workflow, channel: release). Publish it with switch-release.yml
+# ("android"), beside the NROs.
+#
+#   beta      mcdub3-<ANDROID_VERSION>-beta.<run number>.apk
+#   release   mcdub3-<ANDROID_VERSION>.apk
+#
+# The APK is built from the lifted code of the disc's default.xbe, so the
+# build runs on the self-hosted runner with the discs (labels self-hosted,
+# mcdub3-disc), as the Switch build does. It needs there, in its .env
+# (CONTRIBUTING.md, Releases): ANDROID_HOME (SDK with the NDK and CMake of
+# android/app/build.gradle), MC3_SDL_DIR (SDL2-2.32.10 source), Java 17+,
+# and MC3_ANDROID_KEYS: the folder with keys/android-release.jks and
+# .properties. The release key stays on that machine, never on GitHub
+# (not a secret, not an artifact); a runner without it fails rather than
+# make another (tools/android_build.sh), since an APK signed with another
+# key cannot update the installed one. A push can only come from this
+# repository: a fork's pull request never reaches the runner.
+name: Android build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "android/**"
+      - ".github/workflows/android-build.yml"
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: "beta (mcdub3-<version>-beta.<n>.apk) or release (mcdub3-<version>.apk)"
+        type: choice
+        options: [beta, release]
+        default: beta
+      description:
+        description: "What this build is (shown with the artifact and the release)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-build
+  cancel-in-progress: false
+
+jobs:
+  tests:
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    name: APK (dub, ${{ inputs.channel || 'beta' }})
+    needs: tests
+    runs-on: [self-hosted, mcdub3-disc]
+    timeout-minutes: 240
+    env:
+      GAME: dub
+      CHANNEL: ${{ inputs.channel || 'beta' }}
+      # Kept between runs on the runner: the Python venv, the lift, build trees.
+      MC3_WORK: ${{ github.workspace }}/../mcdub3-work-android-dub
+      GRADLE_USER_HOME: ${{ github.workspace }}/../gradle-home
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: true
+
+      - name: Version
+        id: version
+        run: |
+          source switch/app.env
+          source "config/$GAME/app.env"
+          v="${ANDROID_VERSION:-$APP_VERSION}"
+          if [ "$CHANNEL" = beta ]; then
+            beta="${{ github.run_number }}"
+            label="$v-beta.$beta"
+          else
+            beta=""
+            label="$v"
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "beta=$beta" >> "$GITHUB_OUTPUT"
+          echo "label=$label" >> "$GITHUB_OUTPUT"
+          echo "build_id=$label+${{ github.run_number }}.${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          echo "Building mcdub3 $label for Android ($CHANNEL)"
+
+      - name: Runner setup
+        run: |
+          : "${MC3_DISCS:?the runner needs MC3_DISCS in its .env (CONTRIBUTING.md, Releases)}"
+          : "${ANDROID_HOME:?the runner needs ANDROID_HOME (Android SDK with NDK and CMake) in its .env}"
+          : "${MC3_SDL_DIR:?the runner needs MC3_SDL_DIR (SDL2-2.32.10 source) in its .env}"
+          : "${MC3_ANDROID_KEYS:?the runner needs MC3_ANDROID_KEYS (the folder with android-release.jks and .properties) in its .env}"
+          test -f "$MC3_ANDROID_KEYS/android-release.properties" \
+            || { echo "no android-release.properties in MC3_ANDROID_KEYS ($MC3_ANDROID_KEYS)"; exit 1; }
+          java -version 2>&1 | head -1
+
+      - name: Disc
+        run: |
+          # The lifted edition's disc (config/<game>/xbe_facts.h), as in
+          # switch-build.yml.
+          source "config/$GAME/game.env"
+          lift=$(sed -n 's/^#define MC3_EDITION *"\(.*\)"/\1/p' "config/$GAME/xbe_facts.h")
+          prefix=${MC3_DISC_PREFIX#game}; prefix=${prefix#-}
+          disc="$MC3_DISCS/${prefix:+$prefix-}$lift"
+          test -f "$disc/default.xbe" \
+            || { echo "no disc for $GAME $lift (the lifted edition) at $disc"; exit 1; }
+          echo "MC3_GAME_DIR=$disc" >> "$GITHUB_ENV"
+
+      - name: Python for the lift
+        run: |
+          if ! "$MC3_WORK/venv/bin/python3" -c 'import capstone' 2>/dev/null; then
+            python3 -m venv "$MC3_WORK/venv"
+            "$MC3_WORK/venv/bin/pip" install -q capstone
+          fi
+
+      - name: Lift
+        run: |
+          make lift
+          git diff --exit-code "config/$GAME/xbe_facts.h" \
+            || { echo "config/$GAME/xbe_facts.h differs for this disc: run make lift GAME=$GAME locally and commit it"; exit 1; }
+
+      - name: Build
+        env:
+          DESCRIPTION: ${{ inputs.description }}       # as data, never as script
+          MC3_BETA: ${{ steps.version.outputs.beta }}
+          LABEL: ${{ steps.version.outputs.label }}
+          BUILD_ID: ${{ steps.version.outputs.build_id }}
+        run: |
+          bash tools/android_build.sh release
+          apk="mcdub3-$LABEL.apk"
+          out="$RUNNER_TEMP/release"
+          mkdir -p "$out"
+          cp "$MC3_WORK/android/$apk" "$out/"
+          # .apkinfo, not .buildinfo: the release checks NROs by their .buildinfo.
+          {
+            echo "app=mcdub3"
+            echo "platform=android"
+            echo "version=${{ steps.version.outputs.version }}"
+            echo "label=$LABEL"
+            echo "channel=$CHANNEL"
+            echo "build=$BUILD_ID"
+            echo "commit=$GITHUB_SHA"
+            echo "apk=$apk"
+            echo "apk_sha256=$(sha256sum "$out/$apk" | cut -d' ' -f1)"
+          } > "$out/${apk%.apk}.apkinfo"
+          printf '%s\n' "$DESCRIPTION" > "$out/description.txt"
+          ls -l "$out"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mcdub3-android-${{ steps.version.outputs.label }}
+          path: ${{ runner.temp }}/release/
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Summary
+        env:
+          DESCRIPTION: ${{ inputs.description }}
+        run: |
+          {
+            echo "### mcdub3 ${{ steps.version.outputs.label }} (Android, $CHANNEL)"
+            echo
+            echo "Build \`${{ steps.version.outputs.build_id }}\`, run ID \`${{ github.run_id }}\`."
+            if [ -n "$DESCRIPTION" ]; then echo; echo "$DESCRIPTION"; fi
+            echo
+            echo "Publish it with a Switch release: Actions > Switch release > Run workflow, android: on (the latest successful Android build is the default; this one is run ID \`${{ github.run_id }}\`)."
+          } >> "$GITHUB_STEP_SUMMARY"

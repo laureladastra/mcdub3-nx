@@ -13,24 +13,41 @@ def envVar = { String name, String dflt ->
     def m = (appEnv =~ /(?m)^${name}="?([^"\n]*)"?/)
     m.find() ? m.group(1) : dflt
 }
-def appVersion = envVar('APP_VERSION', '0.0.0')
-// 1.2.3 -> 10203: Android installs an update only over a lower code
+// The Android app's own version (ANDROID_VERSION in config/<game>/app.env;
+// APP_VERSION where there is none). -PMC3_BETA=<n>: a beta, <version>-beta.<n>
+// (.github/workflows/android-build.yml).
+def appVersion = envVar('ANDROID_VERSION', envVar('APP_VERSION', '0.0.0'))
+def beta = project.hasProperty('MC3_BETA') && project.MC3_BETA.toString().isInteger()
+           ? project.MC3_BETA.toString().toInteger() : 0
+def versionLabel = beta > 0 ? "${appVersion}-beta.${beta}" : appVersion
+// Android installs an update only over a lower code: x.y.z -> (x*10000 +
+// y*100 + z) * 1000 + beta (1..998), a release + 999: a beta goes before
+// its release, the release over every beta of it, the next version over
+// both.
 def appVersionCode = { ->
     def p = (appVersion.tokenize('.-') + ['0', '0', '0']).take(3).collect { it.isInteger() ? it.toInteger() : 0 }
-    Math.max(1, p[0] * 10000 + p[1] * 100 + p[2])
+    (p[0] * 10000 + p[1] * 100 + p[2]) * 1000 + (beta > 0 ? Math.min(beta, 998) : 999)
 }()
 // The release key (tools/android_build.sh release makes it once): personal,
-// in keys/ (ignored). Every update must be signed with it, or Android
-// refuses to install it over the old one.
-def releaseKey = new File(repo, 'keys/android-release.properties')
+// in keys/ (ignored), or the folder MC3_ANDROID_KEYS names (a build runner:
+// the key stays on that machine, never on GitHub). Every update must be
+// signed with it, or Android refuses to install it over the old one.
+def keysDir = System.getenv('MC3_ANDROID_KEYS') ? new File(System.getenv('MC3_ANDROID_KEYS'))
+                                                 : new File(repo, 'keys')
+def releaseKey = new File(keysDir, 'android-release.properties')
 def releaseProps = new Properties()
 if (releaseKey.exists())
     releaseKey.withInputStream { releaseProps.load(it) }
 def app = game == 'remix' ? 'mcdub3remix' : 'mcdub3'
 def label = game == 'remix' ? 'Midnight Club 3 Remix' : 'Midnight Club 3'
-def sdl = new File(repo, "work-${game == 'remix' ? 'remix' : 'dub'}/tools/SDL2-2.32.10")
+// SDL2's source: MC3_SDL_DIR (a build runner), else work-<game>/tools/.
+def sdl = System.getenv('MC3_SDL_DIR') ? new File(System.getenv('MC3_SDL_DIR'))
+          : new File(repo, "work-${game == 'remix' ? 'remix' : 'dub'}/tools/SDL2-2.32.10")
 if (!sdl.exists())
     sdl = new File(repo, 'work-dub/tools/SDL2-2.32.10')
+// The lifted code: MC3_WORK's gen/ (a build runner keeps its work folder
+// outside the checkout), else the repo's CMakeLists.txt finds work-<game>/.
+def genDir = System.getenv('MC3_WORK') ? new File(System.getenv('MC3_WORK'), 'gen') : null
 
 // The launcher icon from the game's artwork (config/<game>/app.env APP_ICON,
 // per edition; personal, not in git), made by tools/app_icon.py into
@@ -77,7 +94,7 @@ android {
         minSdk 33
         targetSdk 35
         versionCode appVersionCode
-        versionName appVersion
+        versionName versionLabel
         resValue 'string', 'app_name', label
         resValue 'string', 'sd_dir', "${app}-nx"     // the Switch build's folder (MC3_SD_DIR)
         ndk { abiFilters 'arm64-v8a' }
@@ -85,8 +102,10 @@ android {
             cmake {
                 arguments "-DMC3_REPO=${repo}", "-DMC3_SDL_DIR=${sdl}",
                           "-DMC3_GAME=${game}", "-DMC3_PACKAGE_EDITION=${edition}",
-                          "-DMC3_VERSION=${appVersion}", "-DMC3_NATIVE_BINK=OFF",
+                          "-DMC3_VERSION=${versionLabel}", "-DMC3_NATIVE_BINK=OFF",
                           '-DANDROID_STL=c++_static'
+                if (genDir)
+                    arguments "-DMC3_GEN_DIR=${genDir}"
             }
         }
     }
@@ -106,7 +125,9 @@ android {
     signingConfigs {
         release {
             if (releaseProps.storeFile) {
-                storeFile new File(repo, releaseProps.storeFile)
+                // storeFile as written (keys/android-release.jks): the file
+                // of that name beside the .properties
+                storeFile new File(keysDir, new File(releaseProps.storeFile).name)
                 storePassword releaseProps.storePassword
                 keyAlias releaseProps.keyAlias
                 keyPassword releaseProps.keyPassword
@@ -120,10 +141,11 @@ android {
             signingConfig releaseProps.storeFile ? signingConfigs.release : null
         }
     }
-    // <app>-<version>.apk (mcdub3-1.0.0.apk); debug builds -debug.apk
+    // <app>-<version>.apk (mcdub3-0.1.0.apk, a beta mcdub3-0.1.0-beta.3.apk);
+    // debug builds -debug.apk
     applicationVariants.all { variant ->
         variant.outputs.all {
-            outputFileName = "${app}-${appVersion}${variant.buildType.name == 'release' ? '' : '-debug'}.apk"
+            outputFileName = "${app}-${versionLabel}${variant.buildType.name == 'release' ? '' : '-debug'}.apk"
         }
     }
     packagingOptions {

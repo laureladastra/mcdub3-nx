@@ -9,7 +9,14 @@
 #             waits here for approval. Then it checks the build, the version,
 #             the notes and the NROs.
 #   publish   GitHub runner: tags v<version> on the build's commit and
-#             publishes the NROs.
+#             publishes the NROs, and the APK with "android" on.
+#
+# android (off by default): the Android APK too, from the latest successful
+# "Android build" (android-build.yml) or the one whose run ID is given in
+# android_run_id: its .apkinfo checked against the APK, and only a release
+# build (mcdub3-<ANDROID_VERSION>.apk), never a beta. The release is then
+# titled "mcdub3-nx.nro v<version> (Nintendo Switch) and
+# mcdub3-<android version>.apk (Android)".
 #
 # The release notes are the "## v<version>" section of RELEASE_NOTES.md, as
 # committed in the build's commit; the version is config/dub/app.env's
@@ -27,6 +34,14 @@ on:
         description: "Mark as a pre-release"
         type: boolean
         default: true
+      android:
+        description: "Also publish the Android APK (a release build of Android build)"
+        type: boolean
+        default: false
+      android_run_id:
+        description: "Run ID of the Android build (empty: the latest successful one)"
+        required: false
+        default: ""
 
 permissions:
   contents: write     # tag and release
@@ -140,6 +155,35 @@ jobs:
           [ "$n" -gt 0 ] || { echo "no NRO in build ${{ steps.build.outputs.run_id }}"; exit 1; }
           cp "$RUNNER_TEMP/notes.md" ./notes.md
 
+      - name: The Android build
+        if: inputs.android
+        env:
+          ANDROID_RUN_ID: ${{ inputs.android_run_id }}
+        run: |
+          if [ -z "$ANDROID_RUN_ID" ]; then
+            ANDROID_RUN_ID=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/android-build.yml/runs?status=success&per_page=1" \
+              --jq '.workflow_runs[0].id // empty')
+            [ -n "$ANDROID_RUN_ID" ] || { echo "no successful Android build yet: run Android build (channel release) first"; exit 1; }
+            echo "No Android run ID given: the latest successful Android build, $ANDROID_RUN_ID"
+          fi
+          [[ "$ANDROID_RUN_ID" =~ ^[0-9]+$ ]] || { echo "android_run_id must be a number"; exit 1; }
+          IFS=$'\t' read -r path conclusion < <(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$ANDROID_RUN_ID" \
+            --jq '[.path, .conclusion] | @tsv')
+          [ "$path" = ".github/workflows/android-build.yml" ] \
+            || { echo "run $ANDROID_RUN_ID is from $path, not an Android build"; exit 1; }
+          [ "$conclusion" = "success" ] || { echo "run $ANDROID_RUN_ID did not succeed ($conclusion)"; exit 1; }
+          gh run download "$ANDROID_RUN_ID" -R "$GITHUB_REPOSITORY" -p 'mcdub3-android-*' -D "$RUNNER_TEMP/android"
+          info=$(ls "$RUNNER_TEMP"/android/*/*.apkinfo 2>/dev/null | head -1)
+          [ -n "$info" ] || { echo "no APK in Android build $ANDROID_RUN_ID"; exit 1; }
+          channel=$(sed -n 's/^channel=//p' "$info")
+          [ "$channel" = release ] \
+            || { echo "Android build $ANDROID_RUN_ID is a $channel build: publish a release build (Android build, channel release)"; exit 1; }
+          apk="$(dirname "$info")/$(sed -n 's/^apk=//p' "$info")"
+          echo "$(sed -n 's/^apk_sha256=//p' "$info")  $apk" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/build/android"
+          cp "$apk" "$info" "$RUNNER_TEMP/build/android/"
+          echo "Android: $(basename "$apk") from run $ANDROID_RUN_ID"
+
       - uses: actions/upload-artifact@v4
         with:
           name: release-checked
@@ -178,12 +222,27 @@ jobs:
               title=$(sed -n 's/^title=//p' "$info"); title=${title:-Midnight Club 3: DUB Edition}
               echo "| \`$f\` | $title | $(sed -n 's/^edition=//p' "$info") | \`$(sed -n 's/^nro_sha256=//p' "$info")\` |"
             done
+            apkinfo=$(ls build/android/*.apkinfo 2>/dev/null | head -1)
+            if [ -n "$apkinfo" ]; then
+              echo
+              echo "| File | Platform | Version | SHA-256 |"
+              echo "|---|---|---|---|"
+              echo "| \`$(sed -n 's/^apk=//p' "$apkinfo")\` | Android | $(sed -n 's/^label=//p' "$apkinfo") | \`$(sed -n 's/^apk_sha256=//p' "$apkinfo")\` |"
+            fi
             echo
             echo "Build $(sed -n 's/^build=//p' build/*/*.buildinfo | head -1), commit $SHA."
           } > body.md
           flags=()
           [ "$PRERELEASE" = "true" ] && flags+=(--prerelease)
-          gh release create "$TAG" build/*/*.nro \
+          files=(build/*/*.nro)
+          title="mcdub3-nx.nro $TAG (Nintendo Switch)"
+          apkinfo=$(ls build/android/*.apkinfo 2>/dev/null | head -1)
+          if [ -n "$apkinfo" ]; then
+            apk=$(sed -n 's/^apk=//p' "$apkinfo")
+            files+=("build/android/$apk")
+            title="$title and $apk (Android)"
+          fi
+          gh release create "$TAG" "${files[@]}" \
             --repo "$GITHUB_REPOSITORY" --target "$SHA" \
-            --title "mcdub3-nx $TAG" --notes-file body.md "${flags[@]}"
+            --title "$title" --notes-file body.md "${flags[@]}"
           echo "published $TAG" >> "$GITHUB_STEP_SUMMARY"

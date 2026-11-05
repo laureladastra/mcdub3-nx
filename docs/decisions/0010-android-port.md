@@ -81,6 +81,13 @@ OpenGL through EGL).
   it, so it is kept safe. The native code is optimised in every variant
   (the debug variant built the runtime at -O0), the lifted code at -O2
   as on the Switch.
+- **Version and CI**: the app's own `ANDROID_VERSION` (0.1.0, a beta),
+  apart from the games'. `android-build.yml` builds a beta on every push
+  to `main` that changes `android/` and a release by hand, on the
+  self-hosted runner with the disc; the runner signs with a copy of the
+  release key in `MC3_ANDROID_KEYS` (its own folder, never GitHub). The
+  Switch release publishes the APK beside the NROs when asked
+  ("android"; release builds only) (CONTRIBUTING.md, Releases (Android)).
 
 ## Consequences
 
