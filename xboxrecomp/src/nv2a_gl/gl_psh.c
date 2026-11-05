@@ -360,6 +360,11 @@ int nv2a_gl_psh(const Nv2aPshKey *k, char *buf, size_t cap)
         "uniform vec4 u_fc0; uniform vec4 u_fc1;\n"
         "uniform vec4 u_fogcolor;\n"
         "uniform int u_alpha_func; uniform float u_alpha_ref;\n"
+        /* signed blending done in two passes (nv2a_gl.c, sgn_draw): 1 the
+         * negative part, 2 the positive part, of the output read as signed
+         * bytes; GL only */
+        "#define NV2A_SGN 1\n"
+        "uniform int u_sgn;\n"
         "out vec4 fragColor;\n"
         "void main() {\n");
     for (i = 0; i < 4; i++)
@@ -415,6 +420,13 @@ int nv2a_gl_psh(const Nv2aPshKey *k, char *buf, size_t cap)
         "    else if (u_alpha_func == 0x205) pass = ar != u_alpha_ref;\n"
         "    else if (u_alpha_func == 0x206) pass = ar >= u_alpha_ref;\n"
         "    if (!pass) discard;\n"
+        "#ifdef NV2A_SGN\n"
+        "    if (u_sgn != 0) {\n"
+        "        vec4 b = floor(fragColor * 255.0 + 0.5);\n"
+        "        vec4 sv = (b - step(128.0, b) * 256.0) / 255.0;\n"
+        "        fragColor = u_sgn == 1 ? max(-sv, 0.0) : max(sv, 0.0);\n"
+        "    }\n"
+        "#endif\n"
         "}\n");
     return o.overflow ? -1 : (int)(cap - o.left);
 }

@@ -386,6 +386,7 @@ typedef struct {
     uint32_t used;
     uint32_t aa_sx, aa_sy;
     uint32_t wseq, eseq;                /* drawn into / edge filled (rt_edge_fill) */
+    uint32_t gseq;                      /* s_gseq when last bound for drawing */
 } GlSurf;
 
 /* Depth buffers belong to the title's zeta address, not to a colour surface:
@@ -403,6 +404,7 @@ typedef struct {
      * drawing or clearing, and the converted copy as of then. */
     uint32_t lw, lh, ax, ay, wseq, cseq, cfmt;
     GLuint   dtex, rgba, fbo_a, fbo_b;
+    uint32_t cload;                     /* s_gseq of the colour image loaded (color_to_depth) */
 } GlDepth;
 static GlDepth *s_depth_cur;            /* what depth_get returned last */
 static uint32_t s_zseq;
@@ -628,6 +630,112 @@ static GLuint depth_get(uint32_t va, uint32_t pw, uint32_t ph, int *fresh)
     return d->rb;
 }
 
+/* ── A colour image as a depth buffer ────────────────────────────────
+ *
+ * On the NV2A a buffer is bytes: a title can draw depth into memory as
+ * colour and then name that memory as a surface's zeta. MC3 does it for its
+ * headlight beams (both games): the scene's depth, read as a texture, is
+ * drawn at half size into 0x830FD580 as colour, and the 384x240 light buffer
+ * then uses 0x830FD580 as its depth buffer, the cones tested GEQUAL against
+ * it so only where they reach a surface is lit. Here colour and depth are
+ * separate GL objects, so the depth buffer never saw that image: every cone
+ * failed and the beams were gone. So when a zeta is bound and a colour
+ * surface at the same address was drawn into since, its texels are decoded
+ * as Z24S8 dwords (A8R8G8B8: depth in A, R, G) into the depth buffer.
+ * RECOMP_GL_COLOR_Z=0 off. */
+static uint32_t s_gseq;
+static GLuint s_cz_prog, s_cz_vao;
+static int s_cz_state;                  /* 0 untried, 1 ready, -1 failed/off */
+static GLuint compile(GLenum type, const char *const *src, int n);
+
+static int color_to_depth_init(void)
+{
+    static const char *vs[1] = {
+        "#version 330 core\n"
+        "out vec2 uv;\n"
+        "void main() {\n"
+        "    vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));\n"
+        "    uv = p;\n"
+        "    gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n"
+        "}\n" };
+    static const char *fs[1] = {
+        "#version 330 core\n"
+        "in vec2 uv;\n"
+        "uniform sampler2D u_src;\n"
+        "out vec4 o;\n"
+        "void main() {\n"
+        "    ivec2 sz = textureSize(u_src, 0);\n"
+        "    vec4 c = texelFetch(u_src, clamp(ivec2(uv * vec2(sz)), ivec2(0), sz - 1), 0);\n"
+        "    vec3 b = floor(vec3(c.a, c.r, c.g) * 255.0 + 0.5);\n"
+        "    gl_FragDepth = (b.x * 65536.0 + b.y * 256.0 + b.z) / 16777215.0;\n"
+        "    o = vec4(0.0);\n"
+        "}\n" };
+    GLuint v, f;
+    GLint ok = 0;
+    const char *e;
+    if (s_cz_state)
+        return s_cz_state > 0;
+    s_cz_state = -1;
+    e = getenv("RECOMP_GL_COLOR_Z");
+    if (e && e[0] == '0')
+        return 0;
+    v = compile(GL_VERTEX_SHADER, vs, 1);
+    f = compile(GL_FRAGMENT_SHADER, fs, 1);
+    if (!v || !f) {
+        if (v) glDeleteShader(v);
+        if (f) glDeleteShader(f);
+        return 0;
+    }
+    s_cz_prog = glCreateProgram();
+    glAttachShader(s_cz_prog, v);
+    glAttachShader(s_cz_prog, f);
+    glLinkProgram(s_cz_prog);
+    glDeleteShader(v);
+    glDeleteShader(f);
+    glGetProgramiv(s_cz_prog, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        glDeleteProgram(s_cz_prog);
+        s_cz_prog = 0;
+        return 0;
+    }
+    glUseProgram(s_cz_prog);
+    glUniform1i(glGetUniformLocation(s_cz_prog, "u_src"), 0);
+    s_cur_prog = s_cz_prog;
+    glGenVertexArrays(1, &s_cz_vao);
+    s_cz_state = 1;
+    fprintf(stderr, "  [GL] colour images loaded into depth buffers at the same address (RECOMP_GL_COLOR_Z)\n");
+    return 1;
+}
+
+/* Into the depth buffer attached to s->fbo (bound), the colour image of cs. */
+static void color_to_depth(const GlSurf *cs, const GlSurf *s)
+{
+    static int told;
+    if (!color_to_depth_init())
+        return;
+    if (!told++)
+        fprintf(stderr, "  [GL] depth for 0x%08X from its colour image (%ux%u)\n", cs->va, cs->w, cs->h);
+    glViewport(0, 0, (GLsizei)s->pw, (GLsizei)s->ph);
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_BLEND);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_STENCIL_TEST);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_ALWAYS);
+    glDepthMask(1);
+    glColorMask(0, 0, 0, 0);
+    glUseProgram(s_cz_prog);
+    s_cur_prog = s_cz_prog;
+    active_unit(0);
+    glBindTexture(GL_TEXTURE_2D, cs->tex);
+    glBindVertexArray(s_cz_vao);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glBindVertexArray(s_vao);
+    glColorMask(1, 1, 1, 1);
+    tex_bind_forget();
+    state_dirty();
+}
+
 static GlSurf *surf_bind(const Nv2aSurface *sf, uint32_t zeta_va)
 {
     uint32_t bpp = sf->bytes_per_pixel ? sf->bytes_per_pixel : 4;
@@ -669,6 +777,17 @@ static GlSurf *surf_bind(const Nv2aSurface *sf, uint32_t zeta_va)
                                   GL_RENDERBUFFER, ds);
         s->ds_on = ds;
     }
+    if (zeta_va && s_shared_z) {
+        /* drawn into as colour since this depth buffer last took it in */
+        GlSurf *cs = surf_find(zeta_va);
+        GlDepth *d = s_depth_cur;
+        if (cs && cs != s && cs->gseq > d->cload) {
+            d->cload = cs->gseq;
+            fresh = 0;                  /* the image is what it holds */
+            color_to_depth(cs, s);
+        }
+    }
+    s->gseq = ++s_gseq;
     if (fresh) {                        /* new storage is undefined */
         glDisable(GL_SCISSOR_TEST);
         glDepthMask(1);
@@ -2459,6 +2578,8 @@ typedef struct {
     GLint      u_dend;          /* per-draw matrices of a merged call (gl_vsh.c) */
     int        permat;          /* ... usable: all 16 sets of u_m and u_mv live */
     GLint      u_mv, u_fogplane, u_fog0, u_fog1;   /* fixed-function fog */
+    GLint      u_tm;            /* fixed-function texture matrices (gl_vsh.c) */
+    GLint      u_sgn;           /* signed-blend pass (gl_psh.c; sgn_draw) */
     GLint      u_t[4], u_tscale, u_c0, u_c1, u_fc0, u_fc1, u_fogcolor, u_afunc, u_aref;
     uint32_t   used;
     int        vpc_valid;       /* vpc holds what this program's "c" was given */
@@ -2473,6 +2594,7 @@ typedef struct {
         float surf[4], aa[2], m[16], vpoff[4], tscale[4][2];
         float c0[8][4], c1[8][4], fog[4], fc[2][4], aref;
         float mv[16], fogplane[4], fog0[4], fog1[4], snapy;
+        float tm[16][4];        /* texture matrices' rows; identity where off */
         int   xform, afunc;
     } uni;
 } GlProg;
@@ -2767,6 +2889,9 @@ static int prog_bin_init(void)
         for (k = 0; k < 3; k++)
             if (src[k])
                 s_bin_driver = fnv64(s_bin_driver, src[k], strlen(src[k]));
+        /* the pixel shaders are generated per program: a tag for changes
+         * to what every one of them holds (2026-11-05: u_sgn) */
+        s_bin_driver = fnv64(s_bin_driver, "psh u_sgn 1", 11);
     }
     n = strlen(path);
     if (n > 4 && !strcmp(path + n - 4, ".bin"))
@@ -3207,6 +3332,8 @@ static GlProg *prog_register(uint64_t vkey, const Nv2aPshKey *pk, GLuint prog)
     p->u_xform = glGetUniformLocation(p->prog, "u_xform");
     p->u_mv = glGetUniformLocation(p->prog, "u_mv");
     p->u_fogplane = glGetUniformLocation(p->prog, "u_fogplane");
+    p->u_tm = glGetUniformLocation(p->prog, "u_tm");
+    p->u_sgn = glGetUniformLocation(p->prog, "u_sgn");
     p->u_fog0 = glGetUniformLocation(p->prog, "u_fog0");
     p->u_fog1 = glGetUniformLocation(p->prog, "u_fog1");
     p->u_tscale = glGetUniformLocation(p->prog, "u_tscale");
@@ -3671,6 +3798,19 @@ static void argb_vec4(uint32_t v, float out[4])
     out[2] = byte_f(v, 0);  out[3] = byte_f(v, 24);
 }
 
+/* Signed blending (NV2A FUNC_REVERSE_SUBTRACT_SIGNED 0xF005, FUNC_ADD_SIGNED
+ * 0xF006): the source is read as a two's complement byte -- 0xFF is -1/255,
+ * the smallest negative, not 1.0 -- and the result clamped to 0..1 (xemu
+ * #996, abaire's hardware tests). GL has no such blend, so a draw with one
+ * and factors ONE/ONE goes twice (sgn_draw): an add pass with one sign's part
+ * of the output, a reverse-subtract pass with the other's. MC3 counts its
+ * headlight cones that way into a light buffer's alpha (both games): as an
+ * unsigned add every cone saturated it and the beams came out solid white.
+ * Other factors stay an unsigned add (said once). RECOMP_GL_SIGNED_BLEND=0
+ * off. */
+static uint32_t s_sgn_eq;               /* the signed equation of the draws now, or 0 */
+static int s_sgn_on = -1;
+
 static GLenum blend_eq(uint32_t v)
 {
     switch (v) {
@@ -3753,8 +3893,24 @@ static void apply_state(const uint32_t *r, int has_depth, const GlSurf *s)
         glBlendEquation(blend_eq(r[0x350 / 4]));
         argb_vec4(r[0x34C / 4], bc);
         glBlendColor(bc[0], bc[1], bc[2], bc[3]);
+        s_sgn_eq = 0;
+        if (r[0x350 / 4] == 0xF005 || r[0x350 / 4] == 0xF006) {
+            if (s_sgn_on < 0) {
+                const char *e = getenv("RECOMP_GL_SIGNED_BLEND");
+                s_sgn_on = !(e && e[0] == '0');
+            }
+            if (s_sgn_on && r[0x344 / 4] == 1 && r[0x348 / 4] == 1)
+                s_sgn_eq = r[0x350 / 4];
+            else if (s_sgn_on) {
+                static int told;
+                if (!told++)
+                    fprintf(stderr, "  [GL] signed blend %04X with factors %X/%X: an unsigned add\n",
+                            r[0x350 / 4], r[0x344 / 4], r[0x348 / 4]);
+            }
+        }
     } else {
         glDisable(GL_BLEND);
+        s_sgn_eq = 0;
     }
     if (has_depth && r[0x30C / 4]) {
         glEnable(GL_DEPTH_TEST);
@@ -4563,6 +4719,27 @@ static void stage_upload(void)
 
 /* Issue the held draw. Called by every state-changing GL call (gl_merge.h)
  * while one is held; its time goes to the "draw" phase of the profile. */
+/* One draw call (CALL), as two passes while a signed blend is on (s_sgn_eq,
+ * apply_state): FUNC_REVERSE_SUBTRACT_SIGNED is dst - s, so an add pass with
+ * s's negative part (u_sgn 1) and a reverse-subtract pass with its positive
+ * part (u_sgn 2); FUNC_ADD_SIGNED the other way round. Raw entry points: the
+ * wrapped ones would flush a held draw (gl_merge.h), this may be that flush. */
+#define SGN_DRAW(prog, CALL) do {                                             \
+    if (s_sgn_eq && (prog) && (prog)->u_sgn >= 0) {                           \
+        int first_ = s_sgn_eq == 0xF005 ? 1 : 2;                              \
+        p_glBlendEquation(GL_FUNC_ADD);                                       \
+        p_glUniform1i((prog)->u_sgn, first_);                                 \
+        CALL;                                                                 \
+        p_glBlendEquation(0x800B /* GL_FUNC_REVERSE_SUBTRACT */);             \
+        p_glUniform1i((prog)->u_sgn, 3 - first_);                             \
+        CALL;                                                                 \
+        p_glBlendEquation(GL_FUNC_ADD);  /* as blend_eq left it */            \
+        p_glUniform1i((prog)->u_sgn, 0);                                      \
+    } else {                                                                  \
+        CALL;                                                                 \
+    }                                                                         \
+} while (0)
+
 static void merge_flush(void)
 {
     GlProg *mp;
@@ -4606,20 +4783,22 @@ static void merge_flush(void)
             o[i] = (uint16_t)s_mg.idx[i];
         ring_done(&s_iring, at, (GLsizeiptr)s_mg.n * 2, dst, tmp);
         if (s_mg.bv >= 0 && !s_mg.staged)
-            p_glDrawElementsBaseVertex(s_mg.mode, (GLsizei)s_mg.n, GL_UNSIGNED_SHORT,
-                                       (const void *)(uintptr_t)at, s_mg.bv);
+            SGN_DRAW(mp, p_glDrawElementsBaseVertex(s_mg.mode, (GLsizei)s_mg.n, GL_UNSIGNED_SHORT,
+                                                    (const void *)(uintptr_t)at, s_mg.bv));
         else
-            p_glDrawElements(s_mg.mode, (GLsizei)s_mg.n, GL_UNSIGNED_SHORT, (const void *)(uintptr_t)at);
+            SGN_DRAW(mp, p_glDrawElements(s_mg.mode, (GLsizei)s_mg.n, GL_UNSIGNED_SHORT,
+                                          (const void *)(uintptr_t)at));
     } else {
         at = ring_alloc(&s_iring, (GLsizeiptr)s_mg.n * 4, &dst);
         if (dst)
             memcpy(dst, s_mg.idx, s_mg.n * 4);
         ring_done(&s_iring, at, (GLsizeiptr)s_mg.n * 4, dst, s_mg.idx);
         if (s_mg.bv >= 0 && !s_mg.staged)
-            p_glDrawElementsBaseVertex(s_mg.mode, (GLsizei)s_mg.n, GL_UNSIGNED_INT,
-                                       (const void *)(uintptr_t)at, s_mg.bv);
+            SGN_DRAW(mp, p_glDrawElementsBaseVertex(s_mg.mode, (GLsizei)s_mg.n, GL_UNSIGNED_INT,
+                                                    (const void *)(uintptr_t)at, s_mg.bv));
         else
-            p_glDrawElements(s_mg.mode, (GLsizei)s_mg.n, GL_UNSIGNED_INT, (const void *)(uintptr_t)at);
+            SGN_DRAW(mp, p_glDrawElements(s_mg.mode, (GLsizei)s_mg.n, GL_UNSIGNED_INT,
+                                          (const void *)(uintptr_t)at));
     }
     if (pd || (mp && s_mg.defer)) {     /* back to one set: the program's latest */
         if (mp->u_m >= 0)
@@ -5066,9 +5245,67 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
         argb_vec4(r[0x1E24 / 4], u.fc[1]);
         u.aref = (float)(r[0x340 / 4] & 0xFF);
         u.xform = b->xform == 1 ? 1 : 0;
+        {   /* RECOMP_GL_TEXGEN_TRACE=1: each distinct texture-coordinate
+             * generation / texture-matrix setup a fixed-function draw asks
+             * for, once (the renderer does neither yet: projected textures,
+             * a car's headlight beam, would read one texel) */
+            static int tr = -1, n;
+            static uint32_t seen[64];
+            if (tr < 0) {
+                const char *e = getenv("RECOMP_GL_TEXGEN_TRACE");
+                tr = e && e[0] == '1';
+            }
+            if (tr && u.xform && n < 64) {
+                uint32_t h = 0;
+                int st, k, any = 0;
+                for (st = 0; st < 4; st++) {
+                    for (k = 0; k < 4; k++) {
+                        uint32_t g = r[(0x3C0 + st * 16 + k * 4) / 4];
+                        h = h * 31 + g;
+                        any |= g != 0;
+                    }
+                    h = h * 31 + r[(0x420 + st * 4) / 4];
+                    any |= r[(0x420 + st * 4) / 4] != 0;
+                }
+                if (any) {
+                    int i, dup = 0;
+                    for (i = 0; i < n; i++)
+                        dup |= seen[i] == h;
+                    if (!dup) {
+                        seen[n++] = h;
+                        fprintf(stderr, "  [TEXGEN] frame %u:", s_frame);
+                        for (st = 0; st < 4; st++)
+                            fprintf(stderr, " t%d s/t/r/q %X/%X/%X/%X mat %u;", st,
+                                    r[(0x3C0 + st * 16) / 4], r[(0x3C4 + st * 16) / 4],
+                                    r[(0x3C8 + st * 16) / 4], r[(0x3CC + st * 16) / 4],
+                                    r[(0x420 + st * 4) / 4]);
+                        fprintf(stderr, " shader %08X\n", r[0x1E70 / 4]);
+                    }
+                }
+            }
+        }
         if (p->u_fog0 >= 0)                     /* every program applies the fog unit */
             nv2a_ffp_fog_uniforms(r, u.mv, u.fogplane, u.fog0, u.fog1);
         u.afunc = r[0x300 / 4] ? (GLint)r[0x33C / 4] : 0x207;
+        if (p->u_tm >= 0) {
+            /* Each stage's texture matrix as the registers hold it
+             * (SET_TEXTURE_MATRIX 0x6C0 + 64 per stage), where
+             * SET_TEXTURE_MATRIX_ENABLE (0x420 + 4 per stage) has it on;
+             * identity elsewhere. RECOMP_GL_TEXMAT=0: always identity. */
+            static int tmo = -1;
+            int st, k;
+            if (tmo < 0) {
+                const char *e = getenv("RECOMP_GL_TEXMAT");
+                tmo = !(e && e[0] == '0');
+            }
+            for (st = 0; st < 4; st++)
+                for (k = 0; k < 16; k++) {
+                    float f = k / 4 == k % 4 ? 1.0f : 0.0f;
+                    if (tmo && r[(0x420 + st * 4) / 4])
+                        memcpy(&f, &r[(0x6C0 + st * 64 + k * 4) / 4], sizeof f);
+                    u.tm[st * 4 + k / 4][k % 4] = f;
+                }
+        }
         if (p->uni_valid) {
             /* Values this draw does not read stay as GL has them (and as the
              * cache says), so a change there neither costs an upload nor
@@ -5125,6 +5362,7 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
                 if (p->u_fogplane >= 0 && CH(fogplane)) glUniform4fv(p->u_fogplane, 1, u.fogplane);
                 if (p->u_fog0 >= 0 && CH(fog0)) glUniform4fv(p->u_fog0, 1, u.fog0);
                 if (p->u_fog1 >= 0 && CH(fog1)) glUniform4fv(p->u_fog1, 1, u.fog1);
+                if (p->u_tm >= 0 && CH(tm)) glUniform4fv(p->u_tm, 16, &u.tm[0][0]);
                 if (p->u_tscale >= 0 && CH(tscale)) glUniform2fv(p->u_tscale, p->n_tscale, &u.tscale[0][0]);
                 if (p->u_c0 >= 0 && CH(c0)) glUniform4fv(p->u_c0, p->n_c0, &u.c0[0][0]);
                 if (p->u_c1 >= 0 && CH(c1)) glUniform4fv(p->u_c1, p->n_c1, &u.c1[0][0]);
@@ -5173,9 +5411,10 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
         }
 #if (!defined(_WIN32) || defined(XBOXRECOMP_SDL_HOST)) && !defined(__SWITCH__)
         if (watch_all && watch_key && watch_frame == 0xFFFFFFFFu
-            && xbox_sdl_keyboard_down(SDL_SCANCODE_F12)) {
+            && (xbox_sdl_keyboard_down(SDL_SCANCODE_F12)
+                || xbox_sdl_keyboard_down(SDL_SCANCODE_P))) {   /* P: no Fn key on a Mac */
             watch_frame = s_frame;
-            fprintf(stderr, "  [WATCH] F12: dumping frame %u\n", watch_frame);
+            fprintf(stderr, "  [WATCH] F12/P: dumping frame %u\n", watch_frame);
         }
 #endif
         s_watch_dumping = watch_n < watch_max && watch_all && watch_frame != 0xFFFFFFFFu
@@ -5233,6 +5472,12 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
                     fprintf(stderr, "\n");
                 }
             }
+            fprintf(stderr, "          blend %u %X/%X eq %X | depth test %u func %X write %u | cull %u"
+                    " | texmat %u%u%u%u texgen0 %X/%X/%X/%X\n",
+                    r[0x304 / 4], r[0x344 / 4], r[0x348 / 4], r[0x350 / 4], r[0x30C / 4],
+                    r[0x354 / 4], r[0x35C / 4], r[0x308 / 4], r[0x420 / 4] != 0,
+                    r[0x424 / 4] != 0, r[0x428 / 4] != 0, r[0x42C / 4] != 0,
+                    r[0x3C0 / 4], r[0x3C4 / 4], r[0x3C8 / 4], r[0x3CC / 4]);
             fprintf(stderr, "          4UB spec %08X diff %08X 4F spec %08X %08X %08X %08X fog en %u fc0 %08X fc1 %08X\n",
                     r[0x1940 / 4 + 4], r[0x1940 / 4 + 3], r[0x1A40 / 4], r[0x1A44 / 4],
                     r[0x1A48 / 4], r[0x1A4C / 4], r[0x29C / 4], r[0x1E20 / 4], r[0x1E24 / 4]);
@@ -5598,10 +5843,10 @@ static void gl_draw_raw(const Nv2aRawBatch *b)
                     r[0x1B00 / 4], (r[0x1B04 / 4] >> 8) & 0xFF);
         pf_mark(PF_VTX);
         if (s_base_vertex >= 0)
-            glDrawElementsBaseVertex(mode, (GLsizei)n, idx_type, (const void *)(uintptr_t)idx_at,
-                                     s_base_vertex);
+            SGN_DRAW(p, glDrawElementsBaseVertex(mode, (GLsizei)n, idx_type,
+                                                 (const void *)(uintptr_t)idx_at, s_base_vertex));
         else
-            glDrawElements(mode, (GLsizei)n, idx_type, (const void *)(uintptr_t)idx_at);
+            SGN_DRAW(p, glDrawElements(mode, (GLsizei)n, idx_type, (const void *)(uintptr_t)idx_at));
         s_pf_calls++;
         pf_mark(PF_DRAW);
         if (s_pf_on > 0) {
@@ -5739,18 +5984,26 @@ static void dump_bmp(const char *path, const uint8_t *bgra, uint32_t w, uint32_t
  * gone, 2D on top). */
 static void watch_shot(const GlSurf *s)
 {
-    static int on = -1, n;
+    static int on = -1, n, every = 50, from;
     static char prefix[256];
     static uint8_t *pix;
     static size_t cap;
     if (on < 0) {
+        /* RECOMP_GL_WATCH_SHOT_EVERY=<n> (default 50) and _FROM=<draw>: a
+         * shot every n screen draws from that one on -- 1 to see each draw */
         const char *e = getenv("RECOMP_GL_WATCH_SHOTS");
+        const char *ev = getenv("RECOMP_GL_WATCH_SHOT_EVERY");
+        const char *fr = getenv("RECOMP_GL_WATCH_SHOT_FROM");
         on = e && *e;
         if (on) snprintf(prefix, sizeof prefix, "%s", e);
+        if (ev && atoi(ev) > 0)
+            every = atoi(ev);
+        if (fr)
+            from = atoi(fr);
     }
     if (!on || s->w < 640)
         return;
-    if (++n % 50)
+    if (++n < from || (n - from) % every)
         return;
     {
         size_t need = (size_t)s->pw * s->ph * 4;

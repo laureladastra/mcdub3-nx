@@ -662,10 +662,20 @@ float nv2a_ffp_fog_factor(const uint32_t *r, const float pos[4], float spec_a)
 const char *nv2a_gl_vsh_fixed(void)
 {
     /* Vulkan: these uniforms are members of the prelude's uniform block. */
-    static const char decl[] =
-        "uniform int u_xform;      /* 0 pre-transformed, 1 fixed-function */\n";
+    /* The texture matrices (GL only: nv2a_vk has no u_tm and passes the
+     * coordinates through, as before): stage i's rows are u_tm[4i..4i+3],
+     * identity where the stage's matrix is off. A coordinate goes through
+     * them as on the NV2A (xemu: oT = oT * texMat, the matrix as the
+     * registers hold it): component j is row j dotted with it. Projected
+     * textures -- the Remix's headlight beams on the road -- need it. */
+#define TM_DECL \
+        "uniform int u_xform;      /* 0 pre-transformed, 1 fixed-function */\n" \
+        "uniform vec4 u_tm[16];    /* texture matrices, rows */\n" \
+        "#define NV2A_TM(v, i) vec4(dot(u_tm[i * 4], v), dot(u_tm[i * 4 + 1], v), " \
+        "dot(u_tm[i * 4 + 2], v), dot(u_tm[i * 4 + 3], v))\n"
+    static const char decl[] = TM_DECL;
     static const char body[] =
-        "uniform int u_xform;      /* 0 pre-transformed, 1 fixed-function */\n"
+        TM_DECL
         NV2A_FFP_FOG_GLSL
         "void main() {\n"
         "    nv2a_di = nv2a_draw_index();\n"
@@ -681,7 +691,14 @@ const char *nv2a_gl_vsh_fixed(void)
         "        gl_Position = nv2a_clip(v0.xyz * w, w);\n"
         "    }\n"
         "    vD0 = clamp(v3, 0.0, 1.0); vD1 = clamp(v4, 0.0, 1.0);\n"
-        "    vT0 = v9; vT1 = v10; vT2 = v11; vT3 = v12; vFog = nv2a_ffp_fog();\n"
+        "#ifdef NV2A_TM\n"
+        "    vT0 = NV2A_TM(v9, 0); vT1 = NV2A_TM(v10, 1);\n"
+        "    vT2 = NV2A_TM(v11, 2); vT3 = NV2A_TM(v12, 3);\n"
+        "#else\n"
+        "    vT0 = v9; vT1 = v10; vT2 = v11; vT3 = v12;\n"
+        "#endif\n"
+        "    vFog = nv2a_ffp_fog();\n"
         "}\n";
+#undef TM_DECL
     return nv2a_shader_vk ? body + sizeof decl - 1 : body;
 }
