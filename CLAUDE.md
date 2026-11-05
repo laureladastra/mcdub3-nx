@@ -386,6 +386,32 @@ in nfsu2-sw's README (Configuration section); the toolkit is the same.
   write first); MC3_CAM_TRACE=1 (camera methods per second, projection
   FOV per viewport), MC3_KEYS_TRACE=1.
 
+- Headlight beams (fixed 2026-11-05, both games, every host; xemu #996
+  draws them white): a 384x240 light buffer (0x82799E80). The scene's
+  depth, read as a texture, is drawn at half size into 0x830FD580 as
+  colour; the light buffer names 0x830FD580 as its zeta; each car's two
+  cones (fx_headlight_cone_car, loaded by sub_0003C2F0 in the Remix) go
+  into its alpha, GEQUAL against that depth, with blend equation
+  0xF005 (REVERSE_SUBTRACT_SIGNED: 0xFF is -1/255), counting cone
+  surfaces; blurred and added to the frame. Needed: a colour image
+  loaded into the depth buffer at the same address (RECOMP_GL_COLOR_Z),
+  signed blending as two passes (RECOMP_GL_SIGNED_BLEND), and the
+  fixed-function texture matrices (RECOMP_GL_TEXMAT). WHITE (Q) is the
+  high-beam flash, held; the lights are on by themselves at night.
+  Found with the frame dump (`make run WATCH=1`, F12 or P;
+  RECOMP_GL_WATCH_SHOTS=<absolute prefix> with _EVERY/_FROM: a run starts
+  in work-<game>/, a relative path writes nothing).
+
+- Android (2026-11-04/05, ADR 0010): `make android` / `make
+  android-release` -> work-<game>/android/<app>-<version>.apk, signed
+  with keys/android-release.jks (keep it: updates need the same key).
+  GLES 3.2, else 3.1; a start screen picks the game folder (found in
+  mcdub3-nx/ and switch/mcdub3-nx/ on every storage, any edition) and the
+  on-screen pad mode; keyboard keys handed to SDL as keys. Plays on a
+  Switch under Android 15. The Android emulator on a Mac (ANGLE, GLES
+  3.1) is slow for guest-lock hand-overs and movies: judge speed on a
+  device.
+
 ### First lift (2026-10-14)
 
 21,585 functions, 0 failed, 2.98 M lines of C in 87 chunks (`--split 250`).

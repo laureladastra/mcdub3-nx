@@ -1,5 +1,12 @@
 # Release notes
 
+## Unreleased
+
+### Features
+
+- **Headlight beams.** At night your car's headlights light up the road ahead again, in both games. They were missing entirely before (and show as a white blob in other emulators): the game builds the beam in a small hidden picture using two tricks of the Xbox's graphics chip that the port did not reproduce yet.
+- **Android.** Both games can be installed as an app on Android (sideloaded, you supply the disc). A start screen lets you pick your game folder, including the one the Switch version already uses, and choose whether the on-screen gamepad shows. Controllers and keyboards work too.
+
 ## v1.0.0
 
 **Version 1.0 for both games on the Nintendo Switch.** This release removes the last annoyances: races that felt slow when the frame rate dipped, random zoom-in or out during loading screens, and vertical lines during upscaling.
