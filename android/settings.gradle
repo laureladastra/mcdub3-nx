@@ -1,0 +1,9 @@
+// The Android port (ADR 0010): one app module, built per game (-PMC3_GAME=dub|remix).
+pluginManagement {
+    repositories { google(); mavenCentral(); gradlePluginPortal() }
+}
+dependencyResolutionManagement {
+    repositories { google(); mavenCentral() }
+}
+rootProject.name = 'mcdub3-android'
+include ':app'

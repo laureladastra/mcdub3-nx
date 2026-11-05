@@ -97,9 +97,19 @@ endif()
 if(WIN32)
     list(APPEND MC3_SOURCES src/windows_host.c)   # settings, disc, log when double-clicked
 endif()
+if(ANDROID)
+    list(APPEND MC3_SOURCES src/android_host.c)   # folder, settings, log (ADR 0010)
+endif()
 
-add_executable(${PROJECT_NAME} ${MC3_SOURCES} ${MC3_GEN_SOURCES})
-set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME "${MC3_APP}")
+if(ANDROID)
+    # SDL's Java activity loads the game as libmain.so and calls SDL_main.
+    add_library(${PROJECT_NAME} SHARED ${MC3_SOURCES} ${MC3_GEN_SOURCES})
+    set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME main)
+    target_link_libraries(${PROJECT_NAME} PRIVATE log android)
+else()
+    add_executable(${PROJECT_NAME} ${MC3_SOURCES} ${MC3_GEN_SOURCES})
+    set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME "${MC3_APP}")
+endif()
 target_link_libraries(${PROJECT_NAME} PRIVATE xboxrecomp)
 target_compile_definitions(${PROJECT_NAME} PRIVATE MC3_APP="${MC3_APP}" MC3_SD_DIR="${MC3_SD_DIR}"
     MC3_GAME_TITLE="${MC3_GAME_TITLE}" MC3_DISC_PREFIX="${MC3_DISC_PREFIX}")
@@ -113,7 +123,7 @@ set_property(SOURCE src/main.c APPEND PROPERTY COMPILE_DEFINITIONS
 # mcdub3-nx-eur.nro); empty: the lifted one (config/xbe_facts.h).
 set(MC3_PACKAGE_EDITION "" CACHE STRING "Edition of this package (usa, eur); empty: the lifted one")
 if(MC3_PACKAGE_EDITION)
-    set_property(SOURCE src/main.c APPEND PROPERTY COMPILE_DEFINITIONS
+    set_property(SOURCE src/main.c src/android_host.c APPEND PROPERTY COMPILE_DEFINITIONS
         MC3_PACKAGE_EDITION="${MC3_PACKAGE_EDITION}")
 endif()
 
@@ -172,8 +182,9 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 
 # The generated chunks are huge straight-line functions. -O1 keeps GCC's time
 # and memory per chunk sane on the PC; the Switch's CPU is the bottleneck, so
-# it gets -O2. -fwrapv / no strict aliasing: x86 semantics, not C's.
-if(NINTENDO_SWITCH)
+# it gets -O2, and so does Android (the same Tegra under switchroot; phones
+# no faster). -fwrapv / no strict aliasing: x86 semantics, not C's.
+if(NINTENDO_SWITCH OR ANDROID)
     set(MC3_GEN_OPT "-O2" CACHE STRING "Optimisation for the lifted code")
 else()
     set(MC3_GEN_OPT "-O1" CACHE STRING "Optimisation for the lifted code")

@@ -16,6 +16,13 @@
 /gen/
 /build*/
 /switch_sd/
+# The Android build (android/, ADR 0010): Gradle's caches and outputs, the
+# NDK build's, and local.properties (this machine's SDK path).
+/android/.gradle/
+/android/build/
+/android/app/build/
+/android/app/.cxx/
+/android/local.properties
 
 # Toolkit pipeline outputs, written inside the vendored tree.
 /xboxrecomp/tools/*/output/

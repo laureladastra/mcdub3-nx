@@ -43,7 +43,7 @@ export VULKAN DEBUG GEN_DEBUGINFO JOBS SECS HEADLESS GDB NO_GAME WINDOW VIDEO KE
 
 .PHONY: help setup nsp check-vm extract lift regen relift \
         xbe-edition build build-vk build-debug windows mac-app run run-gdb run-headless snapshot report hoststacks profile record difftest trap \
-        switch switch-vk send \
+        switch switch-vk send android android-release \
         hd-dump hd-tools hd-upscale import-save save-sync-up save-sync-down \
         seeds lift-report log du clean-build clean-gen clean toolkit-test
 
@@ -181,6 +181,14 @@ nsp:  ## NSP forwarders (home-menu apps; locally only), one per edition, from co
 	@mkdir -p $(LOGS)
 	set -o pipefail; bash switch/nsp.sh prepare 2>&1 | tee $(LOGS)/nsp_$(NOW).log
 	set -o pipefail; bash switch/$(if $(filter 1,$(NATIVE)),nsp.sh,docker_build.sh switch/nsp.sh) 2>&1 | tee -a $(LOGS)/nsp_$(NOW).log
+
+android:  ## The APK for testing: work-<game>/android/<app>-<version>-debug.apk (SDK/NDK in work-dub/tools; ADR 0010)
+	@mkdir -p $(LOGS)
+	set -o pipefail; bash tools/android_build.sh debug 2>&1 | tee $(LOGS)/android_$(NOW).log
+
+android-release:  ## The APK to hand out: work-<game>/android/<app>-<version>.apk (mcdub3-1.0.0.apk), signed with keys/android-release.jks (made the first time; keep a copy)
+	@mkdir -p $(LOGS)
+	set -o pipefail; bash tools/android_build.sh release 2>&1 | tee $(LOGS)/android_$(NOW).log
 
 switch-vk:  ## Switch build with Vulkan (NVK)
 	$(MAKE) switch VULKAN=1

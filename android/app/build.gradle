@@ -1,0 +1,132 @@
+// The game as an APK (ADR 0010). Per game: ./gradlew assembleDebug -PMC3_GAME=dub|remix
+// (default dub), edition -PMC3_EDITION=usa|eur. The game's data stays outside
+// the APK: the user copies the disc into the app's folder.
+plugins {
+    id 'com.android.application'
+}
+
+def repo = rootProject.projectDir.parentFile
+def game = project.hasProperty('MC3_GAME') ? project.MC3_GAME : 'dub'
+def edition = project.hasProperty('MC3_EDITION') ? project.MC3_EDITION : (game == 'remix' ? 'eur' : 'usa')
+def appEnv = new File(repo, "config/${game}/app.env").text
+def envVar = { String name, String dflt ->
+    def m = (appEnv =~ /(?m)^${name}="?([^"\n]*)"?/)
+    m.find() ? m.group(1) : dflt
+}
+def appVersion = envVar('APP_VERSION', '0.0.0')
+// 1.2.3 -> 10203: Android installs an update only over a lower code
+def appVersionCode = { ->
+    def p = (appVersion.tokenize('.-') + ['0', '0', '0']).take(3).collect { it.isInteger() ? it.toInteger() : 0 }
+    Math.max(1, p[0] * 10000 + p[1] * 100 + p[2])
+}()
+// The release key (tools/android_build.sh release makes it once): personal,
+// in keys/ (ignored). Every update must be signed with it, or Android
+// refuses to install it over the old one.
+def releaseKey = new File(repo, 'keys/android-release.properties')
+def releaseProps = new Properties()
+if (releaseKey.exists())
+    releaseKey.withInputStream { releaseProps.load(it) }
+def app = game == 'remix' ? 'mcdub3remix' : 'mcdub3'
+def label = game == 'remix' ? 'Midnight Club 3 Remix' : 'Midnight Club 3'
+def sdl = new File(repo, "work-${game == 'remix' ? 'remix' : 'dub'}/tools/SDL2-2.32.10")
+if (!sdl.exists())
+    sdl = new File(repo, 'work-dub/tools/SDL2-2.32.10')
+
+// The launcher icon from the game's artwork (config/<game>/app.env APP_ICON,
+// per edition; personal, not in git), made by tools/app_icon.py into
+// build/generated/mc3-icon: an adaptive icon over SDL's. No artwork or no
+// Python with Pillow: SDL's default icon stays.
+def iconRes = new File(buildDir, 'generated/mc3-icon/res')
+def makeIcon = tasks.register('mc3Icon') {
+    outputs.dir iconRes
+    outputs.upToDateWhen { false }          // cheap; follows the artwork
+    doLast {
+        def fg = new File(iconRes, 'drawable-nodpi/ic_launcher_foreground.png')
+        def xml = new File(iconRes, 'mipmap-anydpi-v26/ic_launcher.xml')
+        iconRes.deleteDir()
+        fg.parentFile.mkdirs()
+        def proc = ['bash', '-c',
+                    '. tools/env.sh && mc3_app_env && art=$(mc3_app_artwork "$1") && [ -n "$art" ] '
+                    + '&& py=$(mc3_pillow_python) && [ -n "$py" ] '
+                    + '&& "$py" tools/app_icon.py android "$art" "$2"', 'mc3Icon',
+                    edition, fg.path].execute(["GAME=${game}"] + System.getenv().collect { k, v -> "$k=$v" }, repo)
+        proc.waitForProcessOutput(System.out, System.err)
+        if (proc.exitValue() == 0 && fg.exists()) {
+            xml.parentFile.mkdirs()
+            xml.text = '<?xml version="1.0" encoding="utf-8"?>\n' +
+                '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">\n' +
+                '    <background android:drawable="@android:color/black" />\n' +
+                '    <foreground android:drawable="@drawable/ic_launcher_foreground" />\n' +
+                '</adaptive-icon>\n'
+        } else {
+            iconRes.deleteDir()
+            iconRes.mkdirs()
+            logger.warn('mc3: no icon artwork or no Python with Pillow: SDL\'s default icon')
+        }
+    }
+}
+preBuild.dependsOn makeIcon
+
+android {
+    namespace 'io.github.laureladastra.mcdub3'
+    compileSdk 35
+    ndkVersion '30.0.16248370'
+
+    defaultConfig {
+        applicationId "io.github.laureladastra.${app}"
+        minSdk 33
+        targetSdk 35
+        versionCode appVersionCode
+        versionName appVersion
+        resValue 'string', 'app_name', label
+        resValue 'string', 'sd_dir', "${app}-nx"     // the Switch build's folder (MC3_SD_DIR)
+        ndk { abiFilters 'arm64-v8a' }
+        externalNativeBuild {
+            cmake {
+                arguments "-DMC3_REPO=${repo}", "-DMC3_SDL_DIR=${sdl}",
+                          "-DMC3_GAME=${game}", "-DMC3_PACKAGE_EDITION=${edition}",
+                          "-DMC3_VERSION=${appVersion}", "-DMC3_NATIVE_BINK=OFF",
+                          '-DANDROID_STL=c++_static'
+            }
+        }
+    }
+    externalNativeBuild {
+        cmake {
+            path 'jni/CMakeLists.txt'
+            version '3.31.6'
+        }
+    }
+    sourceSets {
+        main {
+            // SDL's activity and its helpers, from the SDL source the native build uses
+            java.srcDirs += new File(sdl, 'android-project/app/src/main/java')
+            res.srcDirs += iconRes
+        }
+    }
+    signingConfigs {
+        release {
+            if (releaseProps.storeFile) {
+                storeFile new File(repo, releaseProps.storeFile)
+                storePassword releaseProps.storePassword
+                keyAlias releaseProps.keyAlias
+                keyPassword releaseProps.keyPassword
+            }
+        }
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+            // sideloaded only (ADR 0010): our own key, not a store's
+            signingConfig releaseProps.storeFile ? signingConfigs.release : null
+        }
+    }
+    // <app>-<version>.apk (mcdub3-1.0.0.apk); debug builds -debug.apk
+    applicationVariants.all { variant ->
+        variant.outputs.all {
+            outputFileName = "${app}-${appVersion}${variant.buildType.name == 'release' ? '' : '-debug'}.apk"
+        }
+    }
+    packagingOptions {
+        jniLibs { useLegacyPackaging true }
+    }
+}

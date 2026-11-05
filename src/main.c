@@ -889,9 +889,21 @@ static int game_main_args(int argc, char **argv)
     return game_main();
 }
 
+#if defined(__ANDROID__)
+/* SDL starts the program as SDL_main on a thread of its own (SDL_main.h
+ * renames main); the title then runs on xbox_host_main_run's 64 MB stack
+ * while that thread serves SDL. The folder, log and settings first:
+ * android_host.c. */
+#include <SDL_main.h>
+void android_boot(void);
+#endif
+
 int main(int argc, char **argv)
 {
     extern int xbox_host_main_run(int (*fn)(int, char **), int argc, char **argv);
+#if defined(__ANDROID__)
+    android_boot();
+#endif
 #ifdef _WIN32
     /* Settings files, the disc and the log when started on its own
      * (double-click, shortcut): windows_host.c. */
