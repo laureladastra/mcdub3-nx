@@ -889,7 +889,11 @@ void xbox_guest_pin(int interrupt)
         cpu_set_t set;
         CPU_ZERO(&set);
         CPU_SET(core, &set);
+#if defined(__ANDROID__)
+        sched_setaffinity(0, sizeof set, &set);   /* bionic: this thread (tid 0) */
+#else
         pthread_setaffinity_np(pthread_self(), sizeof set, &set);
+#endif
         (void)interrupt;
     }
 #endif
@@ -1163,7 +1167,9 @@ BOOL TerminateThread(HANDLE h, DWORD exitCode)
 {
     w32_object *o = obj_from(h);
     if (!o || o->kind != K_THREAD) return FALSE;
-    pthread_cancel(o->thread);
+#if !defined(__ANDROID__)
+    pthread_cancel(o->thread);       /* bionic has no cancellation: marked exited only */
+#endif
     pthread_mutex_lock(&o->lock);
     o->exit_code = exitCode;
     o->exited    = 1;
@@ -1994,6 +2000,9 @@ VOID SecureZeroMemory(PVOID ptr, SIZE_T cnt)
 {
 #if defined(__APPLE__)
     memset_s(ptr, cnt, 0, cnt);
+#elif defined(__ANDROID__)
+    volatile unsigned char *p = (volatile unsigned char *)ptr;   /* not optimised away */
+    while (cnt--) *p++ = 0;
 #else
     explicit_bzero(ptr, cnt);
 #endif

@@ -424,6 +424,23 @@ int nv2a_gl_vsh_cubo(void)
     return s_cubo > 0;
 }
 
+/* The prelude without per-draw matrices (as RECOMP_GL_PERDRAW=0), for a
+ * driver that refuses to link a program using it: ANGLE counts gl_VertexID
+ * among the vertex attributes, one too many beside v0..v15. NULL if the
+ * prelude has none. */
+const char *nv2a_gl_vsh_prelude_single(void)
+{
+    static char *single;
+    static int done;
+    if (!done) {
+        const char *p = nv2a_gl_vsh_prelude();
+        done = 1;
+        if (strstr(p, "gl_VertexID"))
+            single = strip_perdraw(p);
+    }
+    return single;
+}
+
 const char *nv2a_gl_vsh_prelude(void)
 {
     static int perdraw = -1;

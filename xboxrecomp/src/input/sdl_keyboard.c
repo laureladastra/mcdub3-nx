@@ -24,7 +24,8 @@
  *   Z / C         left / right thumb click
  *   T F G H or numpad 8 4 2 6           right stick (camera)
  *   Space         A (MC3's handbrake: the Switch's A)
- *   Tab           BACK too (select, reachable while driving)
+ *   Tab           BACK too (select, reachable while driving); so is
+ *                 Android's Back (the gesture, Esc on some keyboards)
  *
  * Keys arrive only while the game window has the focus; losing it releases
  * everything, so a key held while switching away does not stay down.
@@ -37,6 +38,7 @@ int (*xbox_keyboard_driving)(void);
 #if (!defined(_WIN32) || defined(XBOXRECOMP_SDL_HOST)) && !defined(__SWITCH__)
 
 #include <SDL.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -44,8 +46,19 @@ int (*xbox_keyboard_driving)(void);
 
 static volatile unsigned char s_down[SDL_NUM_SCANCODES];
 
+/* RECOMP_KEYBOARD_TRACE=1: each key as the pad layer gets it (a keyboard
+ * that does nothing: do its keys arrive, and as what?). */
 void xbox_sdl_keyboard_event(int scancode, int down)
 {
+    static int trace = -1;
+    if (trace < 0) {
+        const char *v = getenv("RECOMP_KEYBOARD_TRACE");
+        trace = v && *v == '1';
+    }
+    if (trace && scancode >= 0 && scancode < SDL_NUM_SCANCODES
+        && s_down[scancode] != (down ? 1 : 0))
+        fprintf(stderr, "  [KEYBOARD] %s %s\n",
+                SDL_GetScancodeName((SDL_Scancode)scancode), down ? "down" : "up");
     if (scancode >= 0 && scancode < SDL_NUM_SCANCODES)
         s_down[scancode] = down ? 1 : 0;
 }
@@ -135,7 +148,8 @@ void xbox_sdl_keyboard_state(XBOX_INPUT_STATE *s)
     if (s_down[SDL_SCANCODE_L])         b |= XBOX_GAMEPAD_DPAD_RIGHT;
     if (s_down[SDL_SCANCODE_RETURN] || s_down[SDL_SCANCODE_KP_ENTER])
                                         b |= XBOX_GAMEPAD_START;
-    if (s_down[SDL_SCANCODE_BACKSPACE] || s_down[SDL_SCANCODE_TAB])
+    if (s_down[SDL_SCANCODE_BACKSPACE] || s_down[SDL_SCANCODE_TAB]
+        || s_down[SDL_SCANCODE_AC_BACK])  /* Android's Back */
                                         b |= XBOX_GAMEPAD_BACK;
     if (s_down[SDL_SCANCODE_Z])         b |= XBOX_GAMEPAD_LEFT_THUMB;
     if (s_down[SDL_SCANCODE_C])         b |= XBOX_GAMEPAD_RIGHT_THUMB;

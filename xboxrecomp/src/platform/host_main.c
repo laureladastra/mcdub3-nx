@@ -21,7 +21,7 @@
 /* Windows likewise: a window's messages reach only the thread that created
  * it. Created on the boot thread and presented from the title's, the window
  * never answered and Windows marked it "Not Responding" (2026-10-23). */
-#if (defined(__APPLE__) || defined(_WIN32)) && !defined(XBOXRECOMP_NO_SDL)
+#if (defined(__APPLE__) || defined(_WIN32) || defined(__ANDROID__)) && !defined(XBOXRECOMP_NO_SDL)
 #include <SDL.h>
 
 typedef struct HostCall {

@@ -42,7 +42,112 @@
 #endif
 #include <unistd.h>
 #include "gl_api.h"
+#include <stdlib.h>
+#include <string.h>
 #include "gl_merge.h"       /* state-changing GL calls flush a held draw first */
+
+/* ── OpenGL ES (nv2a_gl_es, Android; ADR 0010) ──────────────────────────
+ *
+ * ES has no BGRA pixel transfers: the Xbox's A8R8G8B8 data (B, G, R, A in
+ * memory) goes up as RGBA with red and blue swapped on the way, and comes
+ * back the same way. Uploads are mostly once per texture; the swap is a pass
+ * over what is uploaded. GL_UNPACK_ROW_LENGTH is honoured (tracked here). */
+static int s_es_minor = 2;          /* the ES 3.x context made: 2, or 1 */
+static GLint s_es_unpack_row;
+static uint8_t *s_es_scratch;
+static size_t s_es_scratch_cap;
+
+static uint8_t *es_scratch(size_t need)
+{
+    if (need > s_es_scratch_cap) {
+        free(s_es_scratch);
+        s_es_scratch_cap = need + 65536;
+        s_es_scratch = (uint8_t *)malloc(s_es_scratch_cap);
+        if (!s_es_scratch) s_es_scratch_cap = 0;
+    }
+    return s_es_scratch;
+}
+
+/* w x h BGRA texels from src (rows `row` texels apart) as RGBA, packed. */
+static const void *es_rgba(const void *src, GLsizei w, GLsizei h, GLint row)
+{
+    const uint8_t *in = (const uint8_t *)src;
+    uint8_t *out = es_scratch((size_t)w * (size_t)h * 4);
+    GLsizei x, y;
+    if (!out)
+        return NULL;
+    if (row <= 0) row = w;
+    for (y = 0; y < h; y++) {
+        const uint8_t *r = in + (size_t)y * (size_t)row * 4;
+        uint8_t *o = out + (size_t)y * (size_t)w * 4;
+        for (x = 0; x < w; x++) {
+            o[4 * x] = r[4 * x + 2]; o[4 * x + 1] = r[4 * x + 1];
+            o[4 * x + 2] = r[4 * x];  o[4 * x + 3] = r[4 * x + 3];
+        }
+    }
+    return out;
+}
+
+static inline void es_pixel_storei(GLenum pname, GLint v)
+{
+    if (pname == GL_UNPACK_ROW_LENGTH)
+        s_es_unpack_row = v;
+    p_glPixelStorei(pname, v);
+}
+
+static inline void es_tex_image2d(GLenum t, GLint lv, GLint ifmt, GLsizei w, GLsizei h, GLint bd,
+                                  GLenum fmt, GLenum type, const void *data)
+{
+    if (nv2a_gl_es && fmt == GL_BGRA) {
+        GLint row = s_es_unpack_row;
+        fmt = GL_RGBA;
+        ifmt = GL_RGBA8;
+        if (data && (data = es_rgba(data, w, h, row)) != NULL && row)
+            p_glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+        mg_glTexImage2D(t, lv, ifmt, w, h, bd, fmt, type, data);
+        if (data && row)
+            p_glPixelStorei(GL_UNPACK_ROW_LENGTH, row);
+        return;
+    }
+    mg_glTexImage2D(t, lv, ifmt, w, h, bd, fmt, type, data);
+}
+
+static inline void es_tex_sub_image2d(GLenum t, GLint lv, GLint x, GLint y, GLsizei w, GLsizei h,
+                                      GLenum fmt, GLenum type, const void *data)
+{
+    if (nv2a_gl_es && fmt == GL_BGRA && data) {
+        GLint row = s_es_unpack_row;
+        const void *c = es_rgba(data, w, h, row);
+        if (!c)
+            return;
+        if (row) p_glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+        mg_glTexSubImage2D(t, lv, x, y, w, h, GL_RGBA, type, c);
+        if (row) p_glPixelStorei(GL_UNPACK_ROW_LENGTH, row);
+        return;
+    }
+    mg_glTexSubImage2D(t, lv, x, y, w, h, fmt, type, data);
+}
+
+static inline void es_read_pixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum fmt, GLenum type,
+                                  void *data)
+{
+    mg_glReadPixels(x, y, w, h, nv2a_gl_es && fmt == GL_BGRA ? GL_RGBA : fmt, type, data);
+    if (nv2a_gl_es && fmt == GL_BGRA && data) {
+        uint8_t *p = (uint8_t *)data, t;
+        size_t i, n = (size_t)w * (size_t)h;
+        for (i = 0; i < n; i++) { t = p[4 * i]; p[4 * i] = p[4 * i + 2]; p[4 * i + 2] = t; }
+    }
+}
+#undef glTexImage2D
+#define glTexImage2D es_tex_image2d
+#undef glTexSubImage2D
+#define glTexSubImage2D es_tex_sub_image2d
+#undef glReadPixels
+#define glReadPixels es_read_pixels
+#undef glPixelStorei
+#define glPixelStorei es_pixel_storei
+/* D3DCOLOR vertex colours: BGRA, which ES cannot fetch (es_vtx_copy). */
+#define VTX_BGRA_SIZE (nv2a_gl_es ? 4 : GL_BGRA)
 #include "gl_psh.h"
 #include "gl_vsh.h"
 #include "../platform/host_main.h"
@@ -54,6 +159,8 @@
 
 #if (!defined(_WIN32) || defined(XBOXRECOMP_SDL_HOST)) && !defined(__SWITCH__)
 void xbox_sdl_keyboard_handle(const SDL_Event *e);   /* input/sdl_keyboard.c */
+void xbox_touchpad_handle(const SDL_Event *e);       /* input/touch_pad.c */
+int  xbox_touchpad_image(int sw, int sh, const uint32_t **rgba, int *w, int *h);
 int  xbox_sdl_keyboard_down(int scancode);
 #endif
 #include <pthread.h>
@@ -1609,7 +1716,14 @@ static GLint wrap_mode(uint32_t m)
     switch (m) {
     case 2:  return GL_MIRRORED_REPEAT;
     case 3:  return GL_CLAMP_TO_EDGE;
-    case 4:  return GL_CLAMP_TO_BORDER;
+    case 4: {   /* ES 3.1 has border clamp as an extension only */
+        static int border = -1;
+        if (border < 0)
+            border = !nv2a_gl_es || s_es_minor >= 2
+                  || SDL_GL_ExtensionSupported("GL_EXT_texture_border_clamp")
+                  || SDL_GL_ExtensionSupported("GL_OES_texture_border_clamp");
+        return border ? GL_CLAMP_TO_BORDER : GL_CLAMP_TO_EDGE;
+    }
     case 5:  return GL_CLAMP_TO_EDGE;
     default: return GL_REPEAT;
     }
@@ -2326,7 +2440,8 @@ static void bind_stage(const uint32_t *regs, int i, float scale[2])
                 if (tex_aniso_max() > 1.0f)
                     glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY,
                                     mip && min == GL_LINEAR_MIPMAP_LINEAR ? tex_aniso() : 1.0f);
-                glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_LOD_BIAS, mip ? tex_lod_bias() : 0.0f);
+                if (!nv2a_gl_es)        /* ES has no per-texture LOD bias */
+                    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_LOD_BIAS, mip ? tex_lod_bias() : 0.0f);
             }
         }
     }
@@ -2411,12 +2526,71 @@ static void prog_unlink(GlProg *p)
 
 uint32_t nv2a_gl_program_count(void) { return s_prog_live; }
 
+/* OpenGL ES 3.2 (nv2a_gl_es): every shader is written for GLSL 3.30 core;
+ * the version line becomes ES's, with highp defaults (ES fragment shaders
+ * have none for float). The rest is the same language for what the
+ * renderer uses. */
+#define ES_HEADER_REST "precision highp float;\n" \
+                       "precision highp int;\n"   \
+                       "precision highp sampler2D;\n"
+static const char *es_header(void)
+{
+    return s_es_minor >= 2 ? "#version 320 es\n" ES_HEADER_REST
+                           : "#version 310 es\n" ES_HEADER_REST;
+}
+
 static GLuint compile(GLenum type, const char *const *src, int n)
 {
     GLuint sh = glCreateShader(type);
     GLint ok = 0;
+    const char *es_src[16];
+    char *es_first = NULL;
 
+    if (nv2a_gl_es && n > 0 && n <= 16 && !strncmp(src[0], "#version 330 core\n", 18)) {
+        const char *hdr = es_header();
+        size_t hl = strlen(hdr), rest = strlen(src[0] + 18);
+        es_first = (char *)malloc(hl + rest + 1);
+        if (es_first) {
+            int i;
+            memcpy(es_first, hdr, hl);
+            memcpy(es_first + hl, src[0] + 18, rest + 1);
+            es_src[0] = es_first;
+            for (i = 1; i < n; i++)
+                es_src[i] = src[i];
+            src = es_src;
+        }
+    }
+    {   /* RECOMP_GL_SHADER_DUMP=<dir>: every shader as compiled, numbered;
+         * in its ES form where RECOMP_GL_SHADER_DUMP_ES=1 asks for it on a
+         * desktop context (for review against GLSL ES 3.20). */
+        static const char *dir = (const char *)-1;
+        static int seq, as_es;
+        if (dir == (const char *)-1) {
+            const char *e = getenv("RECOMP_GL_SHADER_DUMP_ES");
+            dir = getenv("RECOMP_GL_SHADER_DUMP");
+            as_es = e && e[0] == '1';
+        }
+        if (dir && dir[0]) {
+            char path[600];
+            FILE *f;
+            int i;
+            snprintf(path, sizeof path, "%s/%04d.%s", dir, seq++,
+                     type == GL_VERTEX_SHADER ? "vert" : "frag");
+            if ((f = fopen(path, "w")) != NULL) {
+                int start = 0;
+                if (as_es && !es_first && n > 0 && !strncmp(src[0], "#version 330 core\n", 18)) {
+                    fputs(es_header(), f);
+                    fputs(src[0] + 18, f);
+                    start = 1;
+                }
+                for (i = start; i < n; i++)
+                    fputs(src[i], f);
+                fclose(f);
+            }
+        }
+    }
     glShaderSource(sh, n, src, NULL);
+    free(es_first);
     glCompileShader(sh);
     glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
     if (!ok) {
@@ -2425,7 +2599,7 @@ static GLuint compile(GLenum type, const char *const *src, int n)
         glGetShaderInfoLog(sh, sizeof log, NULL, log);
         fprintf(stderr, "  [GL] %s shader failed:\n%s\n",
                 type == GL_VERTEX_SHADER ? "vertex" : "fragment", log);
-        if (s_trace)
+        if (s_trace || nv2a_gl_es)          /* ES: the source, to see what its compiler refused */
             for (i = 0; i < n; i++)
                 fprintf(stderr, "%s", src[i]);
         glDeleteShader(sh);
@@ -2917,6 +3091,36 @@ static GLuint prog_build(const Nv2aRawBatch *b, const Nv2aPshKey *pk, uint64_t v
     glDeleteShader(v);
     glDeleteShader(fr);
     glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+    if (!ok && vs[0] != nv2a_gl_vsh_prelude_single() && nv2a_gl_vsh_prelude_single()) {
+        /* Once more without per-draw matrices (gl_VertexID): the program
+         * draws, only its draws don't merge with differing matrices. */
+        static int noted;
+        glDeleteProgram(prog);
+        vs[0] = nv2a_gl_vsh_prelude_single();
+        v = compile(GL_VERTEX_SHADER, vs, nvs);
+        fr = 0;
+        if (v) {
+            const char *fs[1] = { fsrc };
+            fr = compile(GL_FRAGMENT_SHADER, fs, 1);
+        }
+        if (!v || !fr) {
+            if (v) glDeleteShader(v);
+            if (fr) glDeleteShader(fr);
+            return 0;
+        }
+        prog = glCreateProgram();
+        glAttachShader(prog, v);
+        glAttachShader(prog, fr);
+        if (bkey && glProgramParameteri)
+            glProgramParameteri(prog, GL_PROGRAM_BINARY_RETRIEVABLE_HINT, GL_TRUE);
+        glLinkProgram(prog);
+        glDeleteShader(v);
+        glDeleteShader(fr);
+        glGetProgramiv(prog, GL_LINK_STATUS, &ok);
+        if (ok && !noted++)
+            fprintf(stderr, "  [GL] driver refused per-draw matrices (gl_VertexID); "
+                            "such programs linked without them\n");
+    }
     if (!ok) {
         char log[2048];
         glGetProgramInfoLog(prog, sizeof log, NULL, log);
@@ -3286,9 +3490,25 @@ static void gl_make_window(void *unused)
         fprintf(stderr, "  [GL] SDL video: %s\n", SDL_GetError());
         return;
     }
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+    {
+        /* OpenGL ES 3.2 on Android (ADR 0010), or where RECOMP_GL_GLES=1 asks
+         * for it (a desktop driver with ES contexts, to test that path). */
+        const char *e = getenv("RECOMP_GL_GLES");
+#if defined(__ANDROID__)
+        nv2a_gl_es = !(e && e[0] == '0');
+#else
+        nv2a_gl_es = e && e[0] == '1';
+#endif
+    }
+    if (nv2a_gl_es) {
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 2);
+    } else {
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+    }
 #if defined(__APPLE__)
     /* macOS hands out a 3.2+ core context only when asked for a
      * forward-compatible one (GL 2.1 otherwise); it runs GL 4.1 on Metal. */
@@ -3297,12 +3517,23 @@ static void gl_make_window(void *unused)
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
     s_win = SDL_CreateWindow("NV2A", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                              1280, 720, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE
-                             | SDL_WINDOW_ALLOW_HIGHDPI);
+                             | SDL_WINDOW_ALLOW_HIGHDPI
+#if defined(__ANDROID__)
+                             | SDL_WINDOW_FULLSCREEN    /* the screen, landscape */
+#endif
+                             );
     if (!s_win) {
         fprintf(stderr, "  [GL] window: %s\n", SDL_GetError());
         return;
     }
     s_ctx = SDL_GL_CreateContext(s_win);
+    if (!s_ctx && nv2a_gl_es) {
+        /* ES 3.1: many phones, ANGLE (the Android emulator on a Mac) */
+        fprintf(stderr, "  [GL] no OpenGL ES 3.2 context (%s); trying 3.1\n", SDL_GetError());
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
+        s_es_minor = 1;
+        s_ctx = SDL_GL_CreateContext(s_win);
+    }
     if (!s_ctx) {
         fprintf(stderr, "  [GL] context: %s\n", SDL_GetError());
         return;
@@ -3563,7 +3794,13 @@ static void apply_state(const uint32_t *r, int has_depth, const GlSurf *s)
      * depth. GL clips there, so a screen quad placed at the far plane
      * (NFSU2's loading screen, z = 1.0 through its vertex program) vanished
      * whenever rounding put it a hair beyond. */
-    glEnable(0x864F);                               /* GL_DEPTH_CLAMP */
+    {   /* ES: only with EXT_depth_clamp (the vertex shaders clamp z too) */
+        static int dc = -1;
+        if (dc < 0)
+            dc = !nv2a_gl_es || SDL_GL_ExtensionSupported("GL_EXT_depth_clamp");
+        if (dc)
+            glEnable(0x864F);                       /* GL_DEPTH_CLAMP(_EXT) */
+    }
 }
 
 static void psh_key(const uint32_t *r, Nv2aPshKey *k)
@@ -3679,7 +3916,8 @@ static int ring_persist(GlRing *g)
     if (on < 0) {
         const char *e = getenv("RECOMP_GL_PERSIST");
         on = !(e && *e == '0') && glBufferStorage && glFenceSync && glClientWaitSync
-             && glDeleteSync && SDL_GL_ExtensionSupported("GL_ARB_buffer_storage");
+             && glDeleteSync && (SDL_GL_ExtensionSupported("GL_ARB_buffer_storage")
+                                 || (nv2a_gl_es && SDL_GL_ExtensionSupported("GL_EXT_buffer_storage")));
         fprintf(stderr, "  [GL] streaming buffers: %s\n",
                 on ? "persistent mapping (ARB_buffer_storage)" : "mapped per draw");
     }
@@ -3920,6 +4158,46 @@ static void merge_census(int ml, int held_match)
 
 /* A byte range of vertex data (vertex_runs, below). */
 typedef struct { const uint8_t *lo, *hi; GLintptr at; } VRun;
+
+/* Copy bytes of b's vertex data starting at lo to dst. On OpenGL ES the
+ * D3DCOLOR attributes in that range (B, G, R, A in memory; ES fetches no
+ * BGRA) get red and blue swapped on the way. wc: dst is a mapped GPU buffer
+ * (write-combined: never read back), so the swap is done in scratch first. */
+static void es_vtx_copy(uint8_t *dst, const uint8_t *lo, size_t bytes, const Nv2aRawBatch *b, int wc)
+{
+    uint32_t a, mask = 0;
+    uint8_t *w;
+    if (nv2a_gl_es)
+        for (a = 0; a < NV2A_RAW_ATTRS; a++)
+            if ((b->attr_direct & (1u << a)) && b->direct[a].type == 0
+                && b->direct[a].ptr >= lo && b->direct[a].ptr < lo + bytes)
+                mask |= 1u << a;
+    if (!mask) {
+        memcpy(dst, lo, bytes);
+        return;
+    }
+    w = wc ? es_scratch(bytes) : dst;
+    if (!w) {
+        memcpy(dst, lo, bytes);
+        return;
+    }
+    memcpy(w, lo, bytes);
+    for (a = 0; a < NV2A_RAW_ATTRS; a++) {
+        uint8_t *q, t;
+        uint32_t st;
+        if (!(mask & (1u << a)))
+            continue;
+        st = b->direct[a].stride;
+        q = w + (b->direct[a].ptr - lo);
+        do {
+            if (q + 4 > w + bytes) break;
+            t = q[0]; q[0] = q[2]; q[2] = t;
+            q += st;
+        } while (st);
+    }
+    if (wc)
+        memcpy(dst, w, bytes);
+}
 static uint32_t vertex_runs(const Nv2aRawBatch *b, VRun *run, int *of_run);
 
 static int merge_layout(const Nv2aRawBatch *b, GlMergeLayout *L)
@@ -3992,7 +4270,7 @@ static int merge_append(const Nv2aRawBatch *b, const uint32_t *idx, uint32_t n,
     if (!ring_alloc_exact(&s_vring, at, L->bytes, &ptr))
         return 0;
     if (ptr)
-        memcpy(ptr, L->lo, (size_t)L->bytes);
+        es_vtx_copy((uint8_t *)ptr, L->lo, (size_t)L->bytes, b, 1);
     ring_done(&s_vring, at, L->bytes, ptr, L->lo);
     if (!merge_add_indices(idx, n, k))
         return 0;                   /* (vertices written: harmless, unused) */
@@ -4178,11 +4456,11 @@ static int stage_append(const Nv2aRawBatch *b, const GlStageLayout *L, const VRu
         }
         o = s_stg[st].p + at;
         if (L->kind[st] == MG_RANGE) {
-            memcpy(o, run[st].lo, bytes);
+            es_vtx_copy(o, run[st].lo, bytes, b, 0);
         } else if (L->kind[st] == MG_REPEAT) {
             size_t e = (size_t)(run[st].hi - run[st].lo);
             for (v = 0; v < nv; v++)
-                memcpy(o + (size_t)v * L->stride[st], run[st].lo, e);
+                es_vtx_copy(o + (size_t)v * L->stride[st], run[st].lo, e, b, 0);
         } else {
             float *out = (float *)o;
             for (v = 0; v < nv; v++)
@@ -4272,7 +4550,7 @@ static void stage_upload(void)
         }
         size = (GLint)L->size[a];
         switch (L->type[a]) {
-        case 0:  size = GL_BGRA; type = GL_UNSIGNED_BYTE; norm = GL_TRUE; break;
+        case 0:  size = VTX_BGRA_SIZE; type = GL_UNSIGNED_BYTE; norm = GL_TRUE; break;
         case 1:  type = GL_SHORT; norm = GL_TRUE; break;
         case 2:  type = GL_FLOAT; norm = GL_FALSE; break;
         case 4:  type = GL_UNSIGNED_BYTE; norm = GL_TRUE; break;
@@ -4511,7 +4789,7 @@ static int upload_vertices(const Nv2aRawBatch *b)
             at0 = ring_alloc(&s_vring, len + S, &map);
             atS = (at0 + (GLintptr)S - 1) / (GLintptr)S * (GLintptr)S;
             if (map) {
-                memcpy((uint8_t *)map + (atS - at0), run[0].lo, (size_t)len);
+                es_vtx_copy((uint8_t *)map + (atS - at0), run[0].lo, (size_t)len, b, 1);
                 ring_done(&s_vring, at0, len + S, map, NULL);
             } else {
                 ring_done(&s_vring, atS, len, NULL, run[0].lo);
@@ -4532,7 +4810,7 @@ static int upload_vertices(const Nv2aRawBatch *b)
                 off = (GLintptr)(b->direct[a].ptr - run[0].lo);
                 size = (GLint)b->direct[a].size;
                 switch (b->direct[a].type) {
-                case 0:  size = GL_BGRA; type = GL_UNSIGNED_BYTE; norm = GL_TRUE; break;
+                case 0:  size = VTX_BGRA_SIZE; type = GL_UNSIGNED_BYTE; norm = GL_TRUE; break;
                 case 1:  type = GL_SHORT; norm = GL_TRUE; break;
                 case 2:  type = GL_FLOAT; norm = GL_FALSE; break;
                 case 4:  type = GL_UNSIGNED_BYTE; norm = GL_TRUE; break;
@@ -4575,7 +4853,7 @@ static int upload_vertices(const Nv2aRawBatch *b)
         dst = staging;
     }
     for (i = 0; i < nrun; i++)
-        memcpy(dst + run[i].at, run[i].lo, (size_t)(run[i].hi - run[i].lo));
+        es_vtx_copy(dst + run[i].at, run[i].lo, (size_t)(run[i].hi - run[i].lo), b, map != NULL);
     if (np) {
         float *out = (float *)(dst + pack_at);
         for (v = 0; v < nv; v++)
@@ -4601,7 +4879,7 @@ static int upload_vertices(const Nv2aRawBatch *b)
         off = at + run[of_run[a]].at + (b->direct[a].ptr - run[of_run[a]].lo);
         size = (GLint)b->direct[a].size;
         switch (b->direct[a].type) {
-        case 0:  size = GL_BGRA; type = GL_UNSIGNED_BYTE; norm = GL_TRUE; break;
+        case 0:  size = VTX_BGRA_SIZE; type = GL_UNSIGNED_BYTE; norm = GL_TRUE; break;
         case 1:  type = GL_SHORT; norm = GL_TRUE; break;
         case 2:  type = GL_FLOAT; norm = GL_FALSE; break;
         case 4:  type = GL_UNSIGNED_BYTE; norm = GL_TRUE; break;
@@ -5783,6 +6061,113 @@ static int fill_steady_init(void)
     return 1;
 }
 
+#if (!defined(_WIN32) || defined(XBOXRECOMP_SDL_HOST)) && !defined(__SWITCH__)
+/* ── The on-screen pad (input/touch_pad.c) ───────────────────────────
+ * Its picture, blended over the whole window after the frame; uploaded
+ * again only when it changes (a press, a release, the stick moving). */
+static GLuint s_tp_prog, s_tp_tex, s_tp_vao;
+static int s_tp_state;                      /* 0 untried, 1 ready, -1 failed */
+
+static int touchpad_init(void)
+{
+    static const char *vs[1] = {
+        "#version 330 core\n"
+        "out vec2 uv;\n"
+        "void main() {\n"
+        "    vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));\n"
+        "    uv = vec2(p.x, 1.0 - p.y);\n"
+        "    gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n"
+        "}\n" };
+    static const char *fs[1] = {
+        "#version 330 core\n"
+        "in vec2 uv;\n"
+        "uniform sampler2D u_tex;\n"
+        "out vec4 o;\n"
+        "void main() { o = texture(u_tex, uv); }\n" };
+    GLuint v, f;
+    GLint ok = 0;
+    if (s_tp_state)
+        return s_tp_state > 0;
+    s_tp_state = -1;
+    v = compile(GL_VERTEX_SHADER, vs, 1);
+    f = compile(GL_FRAGMENT_SHADER, fs, 1);
+    if (!v || !f) {
+        if (v) glDeleteShader(v);
+        if (f) glDeleteShader(f);
+        return 0;
+    }
+    s_tp_prog = glCreateProgram();
+    glAttachShader(s_tp_prog, v);
+    glAttachShader(s_tp_prog, f);
+    glLinkProgram(s_tp_prog);
+    glDeleteShader(v);
+    glDeleteShader(f);
+    glGetProgramiv(s_tp_prog, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        fprintf(stderr, "  [GL] touch pad link failed: no on-screen pad\n");
+        glDeleteProgram(s_tp_prog);
+        s_tp_prog = 0;
+        return 0;
+    }
+    glUseProgram(s_tp_prog);
+    glUniform1i(glGetUniformLocation(s_tp_prog, "u_tex"), 0);
+    s_cur_prog = s_tp_prog;
+    glGenTextures(1, &s_tp_tex);
+    tex_param_forget(s_tp_tex);
+    glGenVertexArrays(1, &s_tp_vao);
+    s_tp_state = 1;
+    fprintf(stderr, "  [GL] on-screen pad ready (RECOMP_TOUCH_PAD)\n");
+    return 1;
+}
+
+static void touchpad_draw(void)
+{
+    const uint32_t *img;
+    int ww = 0, wh = 0, iw, ih, r;
+    if (!nv2a_gl_screen_size(&ww, &wh) || ww <= 0 || wh <= 0)
+        SDL_GL_GetDrawableSize(s_win, &ww, &wh);
+    r = xbox_touchpad_image(ww, wh, &img, &iw, &ih);
+    if (r < 0 || !touchpad_init())
+        return;
+    active_unit(0);
+    glBindTexture(GL_TEXTURE_2D, s_tp_tex);
+    if (r > 0) {
+        static int tw, th;
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+        glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+        if (iw != tw || ih != th) {
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, iw, ih, 0, GL_RGBA, GL_UNSIGNED_BYTE, img);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            tw = iw;
+            th = ih;
+        } else {
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, iw, ih, GL_RGBA, GL_UNSIGNED_BYTE, img);
+        }
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, ww, wh);
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_STENCIL_TEST);
+    glDisable(GL_CULL_FACE);
+    glColorMask(1, 1, 1, 1);
+    glEnable(GL_BLEND);
+    glBlendEquation(GL_FUNC_ADD);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glUseProgram(s_tp_prog);
+    s_cur_prog = s_tp_prog;
+    glBindVertexArray(s_tp_vao);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glBindVertexArray(s_vao);
+    glDisable(GL_BLEND);
+    tex_bind_forget();
+    state_dirty();
+}
+#endif
+
 /* This frame's step of the counter; afterwards s_fs_tex[s_fs_cur] holds it.
  * Leaves the default framebuffer unbound: the caller binds its own. */
 static void fill_steady_pass(GLuint frame_tex, const float full[4], const float band[2],
@@ -6236,6 +6621,9 @@ static void gl_flip(void)
         glDisable(GL_SCISSOR_TEST);
     }
 swap:
+#if (!defined(_WIN32) || defined(XBOXRECOMP_SDL_HOST)) && !defined(__SWITCH__)
+    touchpad_draw();
+#endif
     if (gl_probe()) {
         /* A blue square straight into the window: does anything we draw
          * reach the screen? */
@@ -6276,6 +6664,7 @@ swap:
             }
 #if (!defined(_WIN32) || defined(XBOXRECOMP_SDL_HOST)) && !defined(__SWITCH__)
             xbox_sdl_keyboard_handle(&e);       /* RECOMP_KEYBOARD (input/) */
+            xbox_touchpad_handle(&e);           /* RECOMP_TOUCH_PAD (input/) */
 #endif
         }
     }
@@ -6713,7 +7102,7 @@ static int gq_enabled(void)
 {
     if (s_gq_on < 0) {
         const char *e = getenv("RECOMP_GL_GPUTIME");
-        s_gq_on = s_pf_on > 0 && !(e && e[0] == '0') && glGenQueries && glBeginQuery
+        s_gq_on = s_pf_on > 0 && !(e && e[0] == '0') && !nv2a_gl_es && glGenQueries && glBeginQuery
                   && glEndQuery && glGetQueryObjectiv && glGetQueryObjectui64v;
         if (s_pf_on > 0)
             fprintf(stderr, "  [GL] GPU time per render target %s (RECOMP_GL_GPUTIME)\n",

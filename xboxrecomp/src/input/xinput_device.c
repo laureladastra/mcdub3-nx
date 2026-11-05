@@ -286,6 +286,32 @@ static void open_controllers(void)
                 open = 1;
         if (open)
             continue;
+#if defined(__ANDROID__)
+        {
+            /* SDL lists a keyboard with a d-pad (the emulator's, many real
+             * ones) as a joystick: no axes at all. Not a pad -- its keys
+             * reach the keyboard (android/MainActivity.java). */
+            static SDL_JoystickID skipped[8];
+            static int nskip;
+            int k, skip = 0;
+            for (k = 0; k < nskip; k++)
+                skip |= skipped[k] == id;
+            if (!skip) {
+                SDL_Joystick *j = SDL_JoystickOpen(i);
+                if (j && SDL_JoystickNumAxes(j) == 0) {
+                    fprintf(stderr, "  [INPUT] %s: no sticks, a keyboard; not a pad\n",
+                            SDL_JoystickName(j) ? SDL_JoystickName(j) : "?");
+                    if (nskip < 8)
+                        skipped[nskip++] = id;
+                    skip = 1;
+                }
+                if (j)
+                    SDL_JoystickClose(j);
+            }
+            if (skip)
+                continue;
+        }
+#endif
         for (slot = 0; slot < XBOX_MAX_CONTROLLERS && g_pads[slot]; slot++) { }
         if (slot == XBOX_MAX_CONTROLLERS)
             break;
@@ -344,6 +370,10 @@ void xbox_InputInit(void)
 /* The keyboard as player 1 (sdl_keyboard.c). */
 int  xbox_sdl_keyboard_enabled(void);
 void xbox_sdl_keyboard_state(XBOX_INPUT_STATE *s);
+/* The on-screen pad (touch_pad.c). */
+void xbox_touchpad_controller(int connected);
+int  xbox_touchpad_shown(void);
+void xbox_touchpad_state(XBOX_INPUT_STATE *s);
 #endif
 
 DWORD xbox_InputGetState(DWORD dwPort, XBOX_INPUT_STATE *pState)
@@ -382,12 +412,17 @@ DWORD xbox_InputGetState(DWORD dwPort, XBOX_INPUT_STATE *pState)
     SDL_GameController *c = g_pads[dwPort];
     if (!c || !SDL_GameControllerGetAttached(c)) {
 #if !defined(__SWITCH__)
-        /* No pad on port 0: the keyboard can be player 1 (sdl_keyboard.c). */
-        if (dwPort == 0 && xbox_sdl_keyboard_enabled()) {
+        /* No pad on port 0: the keyboard can be player 1 (sdl_keyboard.c),
+         * and the on-screen pad (touch_pad.c). */
+        if (dwPort == 0)
+            xbox_touchpad_controller(0);
+        if (dwPort == 0 && (xbox_sdl_keyboard_enabled() || xbox_touchpad_shown())) {
             g_controller_connected[0] = TRUE;
             memset(pState, 0, sizeof(XBOX_INPUT_STATE));
             pState->dwPacketNumber = ++g_packet[0];
-            xbox_sdl_keyboard_state(pState);
+            if (xbox_sdl_keyboard_enabled())
+                xbox_sdl_keyboard_state(pState);
+            xbox_touchpad_state(pState);
             return ERROR_SUCCESS;
         }
 #endif
@@ -443,6 +478,10 @@ DWORD xbox_InputGetState(DWORD dwPort, XBOX_INPUT_STATE *pState)
 #if !defined(__SWITCH__)
     if (dwPort == 0 && xbox_sdl_keyboard_enabled())
         xbox_sdl_keyboard_state(pState);            /* on top of the pad */
+    if (dwPort == 0) {
+        xbox_touchpad_controller(1);                /* a pad: the overlay goes */
+        xbox_touchpad_state(pState);                /* unless shown anyway (RECOMP_TOUCH_PAD=1) */
+    }
 #endif
     return ERROR_SUCCESS;
 }

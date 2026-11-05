@@ -49,6 +49,8 @@ typedef struct __GLsync *GLsync;
 #define GL_NONE                           0
 #define GL_ZERO                           0
 #define GL_ONE                            1
+#define GL_SRC_ALPHA                      0x0302
+#define GL_ONE_MINUS_SRC_ALPHA            0x0303
 #define GL_TRIANGLES                      0x0004
 #define GL_NEVER                          0x0200
 #define GL_ALWAYS                         0x0207
@@ -241,6 +243,8 @@ X(GLboolean, glUnmapBuffer, (GLenum)) \
     typedef ret (GLAPIENTRY *PFN_##name) args; extern PFN_##name p_##name;
 NV2A_GL_FUNCS(NV2A_GL_DECLARE)
 NV2A_GL_OPT_FUNCS(NV2A_GL_DECLARE)
+/* 1: the context is OpenGL ES 3.2 (Android), set before nv2a_gl_load. */
+extern int nv2a_gl_es;
 #undef NV2A_GL_DECLARE
 
 /* Resolve every entry point. Returns the number that could not be found

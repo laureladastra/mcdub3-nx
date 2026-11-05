@@ -17,7 +17,7 @@ if(WIN32 AND NOT XBOXRECOMP_SDL_HOST)
     # Offline smoke test for the pure format layer (no D3D11 device needed).
     add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../../tests/d3d8_smoke
                      ${CMAKE_CURRENT_BINARY_DIR}/d3d8_smoke)
-elseif(NINTENDO_SWITCH OR WIN32)
+elseif(NINTENDO_SWITCH OR WIN32 OR ANDROID)
     # No HLE D3D8 renderer on the Switch (or Windows with
     # XBOXRECOMP_WIN_SDL_GL): titles there draw through the NV2A executor and
     # src/nv2a_gl.

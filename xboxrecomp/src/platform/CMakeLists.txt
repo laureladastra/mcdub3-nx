@@ -46,5 +46,9 @@ else()
         find_package(PkgConfig REQUIRED)
         pkg_check_modules(PLATFORM_SDL2 REQUIRED IMPORTED_TARGET sdl2)
         target_link_libraries(platform PUBLIC PkgConfig::PLATFORM_SDL2)
+    elseif(ANDROID)
+        # SDL2 built from source with the app (android/): its target, as on
+        # macOS host_main.c serves SDL from the thread that started it.
+        target_link_libraries(platform PUBLIC SDL2::SDL2)
     endif()
 endif()
