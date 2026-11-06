@@ -69,6 +69,28 @@ SD card (sdmc:)
 
 Copy the game files to the `/game` directory within this folder. Move this folder to `sdmc:/switch/mcdub3-nx/` on the Nintendo Switch. Install the .nsp to get a plug-and-play experience.
 
+### Android
+
+1. Download the APK for your game from the [release page](https://github.com/laureladastra/mcdub3-nx/releases/tag/v1.1.0): `mcdub3-<version>.apk` for DUB Edition, `mcdub3remix-<version>.apk` for Remix. Both can be installed side by side.
+2. Open the APK on your phone to install it. Android asks you to allow installing apps from your browser or file manager; allow it. If Google Play Protect warns about an unknown app, choose **More details › Install without scanning**. The app is not on the Play Store, so Play Protect does not know it.
+3. Start the app once before the next step. The `Android/data/…/files/` folder will be created only after starting the application for the first tinme.
+4. Copy your extracted disc (the folder with `default.xbe` in it) to the app's own folder:
+   - DUB Edition: `Android/data/io.github.laureladastra.mcdub3/files/game/`
+   - Remix: `Android/data/io.github.laureladastra.mcdub3remix/files/game/`
+
+   The app finds it there by itself and needs no extra permission. On Android 11 and newer most file managers cannot open `Android/data`, so copy it from a computer over USB. Note that Android deletes this folder, saves included, when you uninstall the app.
+
+   **Or keep the game elsewhere:** put it at the top of your internal storage or SD card (`/sdcard/mcdub3-nx/`)
+    `sdcard/mcdub3-nx/` (Remix: `sdcard/mcdub3remix-nx/`)where it is found by itself. Alternatively you can pick any folder with **Add folder** on the start screen. Both need **All files access**, which the app asks for.
+5. Optionally choose how the on-screen gamepad behaves: **Automatic** (hidden while a controller is connected), **Always**, or **Never**. Controllers (Bluetooth pads, Joy-Cons) and keyboards work without setup.
+6. Press **Play** to start the game.
+
+If the game doesn't start, the log is `mcdub3_log.txt` (Remix: `mcdub3remix_log.txt`) in the same app folder as in step 3, one level up from `game/`. Please attach it to a bug report.
+
+> [!WARNING]
+> **The most common mistakes are: copying the disc image (`.iso`) instead of its extracted files, or the wrong game's disc (the DUB Edition application with the Remix disc, or the other way round).** The app needs the folder of extracted files, with `default.xbe` in it. To unpack an `.iso`, use [xdvdfs](https://github.com/antangelo/xdvdfs): `xdvdfs unpack <your disc>.iso <folder>`. The wrong game's disc is refused with a message when you press **Play**.
+>
+
 ### Mac
 
 The Mac application can be packaged and installed by following these instructions:
