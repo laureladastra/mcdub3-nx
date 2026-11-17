@@ -29,6 +29,13 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <!-- the game's settings, from the start screen (SettingsActivity.java) -->
+        <activity android:name=".SettingsActivity"
+            android:label="@string/app_name"
+            android:theme="@android:style/Theme.Material.NoActionBar"
+            android:screenOrientation="sensorLandscape"
+            android:configChanges="orientation|screenSize|screenLayout|keyboard|keyboardHidden|navigation"
+            android:exported="false" />
         <!-- the game (SDL): started from the start screen; the app's icon brings
              a running game back (one task) -->
         <activity android:name=".MainActivity"

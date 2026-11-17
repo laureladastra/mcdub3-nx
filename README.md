@@ -82,7 +82,7 @@ Copy the game files to the `/game` directory within this folder. Move this folde
 
    **Or keep the game elsewhere:** put it at the top of your internal storage or SD card (`/sdcard/mcdub3-nx/`)
     `sdcard/mcdub3-nx/` (Remix: `sdcard/mcdub3remix-nx/`)where it is found by itself. Alternatively you can pick any folder with **Add folder** on the start screen. Both need **All files access**, which the app asks for.
-5. Optionally choose how the on-screen gamepad behaves: **Automatic** (hidden while a controller is connected), **Always**, or **Never**. Controllers (Bluetooth pads, Joy-Cons) and keyboards work without setup.
+5. Optionally open **Settings** on the start screen: how the on-screen gamepad behaves (**Automatic**, hidden while a controller is connected, **Always**, or **Never**) and the **aspect ratio** (**16:9** widescreen, or **4:3**, the game's original framing with black bars at the sides). Settings apply the next time the game starts, and win over the same variables in `mcdub3_env.txt` (Remix: `mcdub3remix_env.txt`). Controllers (Bluetooth pads, Joy-Cons) and keyboards work without setup.
 6. Press **Play** to start the game.
 
 If the game doesn't start, the log is `mcdub3_log.txt` (Remix: `mcdub3remix_log.txt`) in the same app folder as in step 3, one level up from `game/`. Please attach it to a bug report.

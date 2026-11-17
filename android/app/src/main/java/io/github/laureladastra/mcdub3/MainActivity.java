@@ -15,20 +15,20 @@ import org.libsdl.app.SDLActivity;
 public class MainActivity extends SDLActivity {
     /* The game folder chosen on the start screen (LauncherActivity). */
     public static final String EXTRA_GAME_DIR = "gameDir";
-    /* The on-screen gamepad: "auto", "1" always, "0" never (touch_pad.c). */
-    public static final String EXTRA_TOUCH_PAD = "touchPad";
+    /* The settings (GameSettings.env): VAR=value per line. */
+    public static final String EXTRA_ENV = "env";
 
     @Override
     protected void onCreate(Bundle state) {
         /* For android_host.c, before the game starts: it wins over the
          * settings file and the search. */
         String dir = getIntent() != null ? getIntent().getStringExtra(EXTRA_GAME_DIR) : null;
-        String pad = getIntent() != null ? getIntent().getStringExtra(EXTRA_TOUCH_PAD) : null;
+        String env = getIntent() != null ? getIntent().getStringExtra(EXTRA_ENV) : null;
         try {
             if (dir != null)
                 Os.setenv("MC3_LAUNCHER_GAME_DIR", dir, true);
-            if (pad != null)
-                Os.setenv("MC3_LAUNCHER_TOUCH_PAD", pad, true);
+            if (env != null)
+                Os.setenv("MC3_LAUNCHER_ENV", env, true);
         } catch (Exception e) {
             /* the native search and defaults then */
         }

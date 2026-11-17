@@ -11,7 +11,6 @@ import android.os.Environment;
 import android.provider.DocumentsContract;
 import android.provider.Settings;
 import android.view.Gravity;
-import android.view.InputDevice;
 import android.view.View;
 import android.widget.Button;
 import android.widget.LinearLayout;
@@ -29,8 +28,8 @@ import java.util.List;
 /* The start screen (ADR 0010): which game folder to play, before SDL and the
  * game start (MainActivity). The first time it is the onboarding -- storage
  * access, then the folder -- and afterwards the list of folders with Play,
- * Add folder and Remove, and the on-screen gamepad's setting, all on the
- * one screen.
+ * Add folder and Remove, all on the one screen. Settings opens the game's
+ * settings (SettingsActivity, GameSettings), handed to the game on Play.
  *
  * A game folder is the extracted disc: the folder holding default.xbe, any
  * edition (the game checks the disc itself at boot). Found by themselves:
@@ -41,8 +40,7 @@ import java.util.List;
  * takes "All files access", asked for here first. */
 public class LauncherActivity extends Activity {
     private static final int PICK_FOLDER = 1;
-    private static final String PREFS = "launcher", FOLDERS = "folders", LAST = "last",
-                                TOUCH_PAD = "touchPad";
+    private static final String FOLDERS = "folders", LAST = "last";
 
     private SharedPreferences prefs;
     private LinearLayout root;
@@ -51,7 +49,7 @@ public class LauncherActivity extends Activity {
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
-        prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        prefs = GameSettings.prefs(this);
         ScrollView scroll = new ScrollView(this);
         scroll.setBackgroundColor(Color.rgb(16, 16, 22));
         root = new LinearLayout(this);
@@ -135,7 +133,7 @@ public class LauncherActivity extends Activity {
             root.addView(text("Already on the SD card for the Switch build (switch/"
                 + getString(R.string.sd_dir) + "/game-usa or game-eur)? It is found by itself "
                 + "once access is allowed.", 13, false, Color.GRAY));
-            touchPadSetting();
+            root.addView(button("Settings", v -> openSettings()));
             return;
         }
 
@@ -170,55 +168,11 @@ public class LauncherActivity extends Activity {
         actions.addView(play);
         actions.addView(button("Add folder", v -> pick()));
         actions.addView(button("Remove", v -> remove()));
+        actions.addView(button("Settings", v -> openSettings()));
         root.addView(actions);
         root.addView(text("Add folder: Android's folder picker; a folder that holds game "
             + "folders adds each of them. Folders found by themselves come back after "
             + "Remove while they hold a disc.", 13, false, Color.GRAY));
-        touchPadSetting();
-    }
-
-    /* The on-screen gamepad: shown when no controller is connected, always
-     * (Joy-Cons on the rails count as connected), or never. */
-    private void touchPadSetting() {
-        String mode = prefs.getString(TOUCH_PAD, "auto");
-        List<String> pads = controllers();
-        root.addView(text("On-screen gamepad", 15, true, Color.LTGRAY));
-        RadioGroup g = new RadioGroup(this);
-        String[][] opts = {
-            { "auto", "Automatic: hidden while a controller is connected" },
-            { "1", "Always show (touch and controllers both work)" },
-            { "0", "Never: controllers or keyboard only" },
-        };
-        for (int i = 0; i < opts.length; i++) {
-            RadioButton rb = new RadioButton(this);
-            rb.setId(2000 + i);
-            rb.setText(opts[i][1]);
-            rb.setTextColor(Color.WHITE);
-            rb.setPadding(dp(8), dp(6), 0, dp(6));
-            g.addView(rb);
-            if (opts[i][0].equals(mode))
-                g.check(rb.getId());
-        }
-        g.setOnCheckedChangeListener((grp, id) ->
-            prefs.edit().putString(TOUCH_PAD, opts[id - 2000][0]).apply());
-        root.addView(g);
-        root.addView(text(pads.isEmpty() ? "Controllers connected now: none"
-            : "Controllers connected now: " + String.join(", ", pads), 13, false, Color.GRAY));
-    }
-
-    private static List<String> controllers() {
-        List<String> out = new ArrayList<>();
-        for (int id : InputDevice.getDeviceIds()) {
-            InputDevice d = InputDevice.getDevice(id);
-            if (d == null || d.isVirtual())
-                continue;
-            int src = d.getSources();
-            if ((src & InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD
-                || (src & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK)
-                if (!out.contains(d.getName()))
-                    out.add(d.getName());
-        }
-        return out;
     }
 
     /* ── Folders ─────────────────────────────────────────────────────── */
@@ -302,6 +256,10 @@ public class LauncherActivity extends Activity {
         }
     }
 
+    private void openSettings() {
+        startActivity(new Intent(this, SettingsActivity.class));
+    }
+
     private void pick() {
         startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), PICK_FOLDER);
     }
@@ -362,7 +320,7 @@ public class LauncherActivity extends Activity {
         prefs.edit().putString(LAST, f).apply();
         Intent i = new Intent(this, MainActivity.class);
         i.putExtra(MainActivity.EXTRA_GAME_DIR, f);
-        i.putExtra(MainActivity.EXTRA_TOUCH_PAD, prefs.getString(TOUCH_PAD, "auto"));
+        i.putExtra(MainActivity.EXTRA_ENV, GameSettings.env(prefs));
         startActivity(i);
         finish();
     }

@@ -406,8 +406,17 @@ in nfsu2-sw's README (Configuration section); the toolkit is the same.
   android-release` -> work-<game>/android/<app>-<version>.apk, signed
   with keys/android-release.jks (keep it: updates need the same key).
   GLES 3.2, else 3.1; a start screen picks the game folder (found in
-  mcdub3-nx/ and switch/mcdub3-nx/ on every storage, any edition) and the
-  on-screen pad mode; keyboard keys handed to SDL as keys. Plays on a
+  mcdub3-nx/ and switch/mcdub3-nx/ on every storage, any edition); its
+  Settings screen (android/.../GameSettings.java, 2026-11-17) holds the
+  on-screen pad mode and the aspect ratio (RECOMP_WIDESCREEN=0: 4:3). A
+  setting is one entry in GameSettings.ALL naming a runtime variable;
+  non-default ones reach android_host.c as MC3_LAUNCHER_ENV (VAR=value
+  lines, applied after the env files); keyboard keys handed to SDL as keys.
+  Mali GPUs (Pixel 9 Pro Fold, 2026-11-17): the driver's /dev/mali0
+  mappings took the top of the guest window before the MCPX/flash
+  apertures mapped (error 8), DirectSound faulted after Play; the window
+  above the span is now held until each mapping takes its slice
+  (xbox_memory_layout.c high_guard_release). Plays on a
   Switch under Android 15. Own version ANDROID_VERSION (0.1.0); CI
   android-build.yml (beta on pushes to android/), published with a Switch
   release when "android" is on. The Android emulator on a Mac (ANGLE, GLES
