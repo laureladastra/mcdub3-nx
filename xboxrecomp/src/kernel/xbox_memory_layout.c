@@ -86,6 +86,33 @@ static void *g_span_base = NULL;
 static size_t g_span_size = 0;
 static void *g_tiled_view = NULL;
 
+/* The guest window above the base+mirrors span, up to base + 4 GB, held
+ * PROT_NONE from the probe until each view, aperture or reservation there
+ * takes its slice (POSIX hosts but the Switch; zero when not held).
+ *
+ * Found 2026-11-17 on a Pixel 9 Pro Fold (Mali GPU): released after the
+ * probe, the top of the free window was the first place top-down mmap
+ * looked, and the GPU driver's own mappings (/dev/mali0, made on its
+ * threads while the title boots) landed there -- the MCPX and flash
+ * apertures failed (error 8) and DirectSound's first register read
+ * faulted. Same carve-from-our-own-reservation as the span above. */
+static uintptr_t g_high_guard_lo = 0, g_high_guard_hi = 0;
+
+/* Hand the part of [native, native + size) the guard holds back, just
+ * before a view, aperture or reservation is made there. */
+static void high_guard_release(uintptr_t native, size_t size)
+{
+#if !defined(_WIN32) && !defined(__SWITCH__)
+    uintptr_t lo = native > g_high_guard_lo ? native : g_high_guard_lo;
+    uintptr_t hi = native + size < g_high_guard_hi ? native + size : g_high_guard_hi;
+    if (g_high_guard_hi && lo < hi)
+        munmap((void *)lo, hi - lo);
+#else
+    (void)native;
+    (void)size;
+#endif
+}
+
 /* Contiguous / physical memory window (see MemoryLayoutInit).
  * XBOX_CONTIG_BASE / XBOX_CONTIG_SIZE come from kernel.h - the bridges need
  * the same numbers for MmClaimGpuInstanceMemory. */
@@ -2214,7 +2241,15 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
             void *probe = mmap(NULL, guest_space, PROT_NONE,
                                MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
             if (probe != MAP_FAILED) {
-                munmap(probe, guest_space);
+                /* The span goes at the start; the rest stays held
+                 * (g_high_guard_*). */
+                if (XBOX_MAP_START == 0 && g_span_size < guest_space) {
+                    munmap(probe, g_span_size);
+                    g_high_guard_lo = (uintptr_t)probe + g_span_size;
+                    g_high_guard_hi = (uintptr_t)probe + guest_space;
+                } else {
+                    munmap(probe, guest_space);
+                }
                 span_hint = (LPVOID)((uintptr_t)probe + XBOX_MAP_START);
             }
         }
@@ -2222,6 +2257,12 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
         g_span_base = VirtualAlloc(span_hint, g_span_size, MEM_RESERVE, PAGE_NOACCESS);
         if (!g_span_base && span_hint)
             g_span_base = VirtualAlloc(NULL, g_span_size, MEM_RESERVE, PAGE_NOACCESS);
+#if !defined(_WIN32) && !defined(__SWITCH__)
+        if (g_high_guard_hi && g_span_base != span_hint) {
+            munmap((void *)g_high_guard_lo, g_high_guard_hi - g_high_guard_lo);
+            g_high_guard_lo = g_high_guard_hi = 0;
+        }
+#endif
         if (g_span_base) {
             VirtualFree(g_span_base, g_memory_size, MEM_RELEASE);
             g_memory_base = MapViewOfFileEx(g_mapping_handle,
@@ -2700,6 +2741,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
      */
     {
         uintptr_t contig_native = XBOX_CONTIG_BASE + g_memory_offset;
+        high_guard_release(contig_native, XBOX_CONTIG_SIZE);
         g_contig_mapping = CreateFileMappingW(
             INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE,
             0, (DWORD)XBOX_CONTIG_SIZE, NULL);
@@ -2745,6 +2787,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
      */
     {
         uintptr_t nv2a_native = XBOX_NV2A_BASE + g_memory_offset;
+        high_guard_release(nv2a_native, XBOX_NV2A_SIZE);
         g_nv2a_memory = VirtualAlloc(
             (LPVOID)nv2a_native,
             XBOX_NV2A_SIZE,
@@ -2790,6 +2833,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
      */
     {
         uintptr_t mcpx_native = XBOX_MCPX_BASE + g_memory_offset;
+        high_guard_release(mcpx_native, XBOX_MCPX_SIZE);
         g_mcpx_memory = VirtualAlloc(
             (LPVOID)mcpx_native,
             XBOX_MCPX_SIZE,
@@ -2887,6 +2931,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
     /* Flash ROM aperture -- see XBOX_FLASH_BASE for why. */
     {
         uintptr_t flash_native = XBOX_FLASH_BASE + g_memory_offset;
+        high_guard_release(flash_native, XBOX_FLASH_SIZE);
 
         g_flash_memory = VirtualAlloc(
             (LPVOID)flash_native,
@@ -2923,6 +2968,8 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
         #define XBOX_KERNEL_BASE 0x80010000u
         #define KERNEL_PAGE_SIZE 4096
         uintptr_t kernel_native = XBOX_KERNEL_BASE + g_memory_offset;
+        if (!g_contig_memory)
+            high_guard_release(kernel_native, KERNEL_PAGE_SIZE);
         /* Already committed if the contiguous window above succeeded -
          * 0x80010000 sits inside it - so just use that storage. */
         g_kernel_memory = g_contig_memory
@@ -3046,6 +3093,7 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
         uint64_t aliased_top = (uint64_t)g_xbox_total_ram * (1u + XBOX_NUM_MIRRORS);
         uint64_t extvma_size = (uint64_t)0x7FFE0000u - aliased_top;
         void *extvma_base = (void *)((uintptr_t)g_memory_base + (uintptr_t)aliased_top);
+        high_guard_release((uintptr_t)extvma_base, (size_t)extvma_size);
 
         if (VirtualAlloc(extvma_base, (SIZE_T)extvma_size, MEM_RESERVE, PAGE_NOACCESS)) {
             g_xbox_extvma_reserved = 1;
@@ -3097,6 +3145,8 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
          */
         if (tiled_size > XBOX_CONTIG_SIZE)
             tiled_size = XBOX_CONTIG_SIZE;
+        if (g_contig_mapping)
+            high_guard_release(tiled_native, tiled_size);
         g_tiled_view = g_contig_mapping
             ? MapViewOfFileEx(
                 g_contig_mapping,
@@ -3242,6 +3292,13 @@ void xbox_MemoryLayoutShutdown(void)
         g_span_base = NULL;
         g_span_size = 0;
     }
+#if !defined(_WIN32) && !defined(__SWITCH__)
+    /* and of the guard above it (its views are gone by now) */
+    if (g_high_guard_hi) {
+        munmap((void *)g_high_guard_lo, g_high_guard_hi - g_high_guard_lo);
+        g_high_guard_lo = g_high_guard_hi = 0;
+    }
+#endif
     fprintf(stderr, "xbox_MemoryLayoutShutdown: released\n");
 }
 

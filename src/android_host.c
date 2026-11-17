@@ -90,6 +90,24 @@ static void log_open(void)
         pthread_detach(th);
 }
 
+/* One KEY=VALUE line (of a settings file or the start screen's settings):
+ * setenv. Blank lines and '#' comments are skipped. Changes line. */
+static void env_line_apply(char *line, const char *from)
+{
+    char *key = line, *eq, *end;
+    while (*key == ' ' || *key == '\t')
+        key++;
+    if (*key == '#' || *key == '\n' || *key == '\r' || !*key)
+        return;
+    if (!(eq = strchr(key, '=')) || eq == key)
+        return;
+    *eq = '\0';
+    end = eq + 1 + strcspn(eq + 1, "\r\n");
+    *end = '\0';
+    setenv(key, eq + 1, 1);
+    printf("[android] %s=%s%s\n", key, eq + 1, from);
+}
+
 static void env_file_apply(const char *dir)
 {
     char path[600], line[512];
@@ -97,20 +115,8 @@ static void env_file_apply(const char *dir)
     snprintf(path, sizeof path, "%s/" MC3_APP "_env.txt", dir);
     if (!(f = fopen(path, "r")))
         return;
-    while (fgets(line, sizeof line, f)) {
-        char *key = line, *eq, *end;
-        while (*key == ' ' || *key == '\t')
-            key++;
-        if (*key == '#' || *key == '\n' || *key == '\r' || !*key)
-            continue;
-        if (!(eq = strchr(key, '=')))
-            continue;
-        *eq = '\0';
-        end = eq + 1 + strcspn(eq + 1, "\r\n");
-        *end = '\0';
-        setenv(key, eq + 1, 1);
-        printf("[android] %s=%s\n", key, eq + 1);
-    }
+    while (fgets(line, sizeof line, f))
+        env_line_apply(line, "");
     fclose(f);
 }
 
@@ -231,12 +237,18 @@ void android_boot(void)
     SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");
     env_file_apply(s_dir);
     env_file_apply("/storage/emulated/0/" MC3_SD_DIR);   /* reachable by a file manager */
-    {   /* the start screen's choice (android/LauncherActivity.java) wins */
+    {   /* the start screen's choices (android/LauncherActivity.java) win */
         const char *l = getenv("MC3_LAUNCHER_GAME_DIR");
+        char *env, *line, *save = NULL;
         if (l && *l)
             setenv("MC3_GAME_DIR", l, 1);
-        if ((l = getenv("MC3_LAUNCHER_TOUCH_PAD")) != NULL && *l)
-            setenv("RECOMP_TOUCH_PAD", l, 1);  /* auto, 1 always, 0 never */
+        /* its settings (android/GameSettings.java): VAR=value per line,
+         * those not at their default */
+        if ((l = getenv("MC3_LAUNCHER_ENV")) != NULL && *l && (env = strdup(l)) != NULL) {
+            for (line = strtok_r(env, "\n", &save); line; line = strtok_r(NULL, "\n", &save))
+                env_line_apply(line, " (settings)");
+            free(env);
+        }
     }
     for (;;) {
         const char *g = getenv("MC3_GAME_DIR");
