@@ -72,6 +72,14 @@ final class GameSettings {
             { "1", "16:9 widescreen" },
             { "0", "4:3: the original framing, black bars at the sides" },
         }, null),
+        /* nv2a_pb_exec.c flip_wait_vblank: each flip waits for the next
+         * emulated 60 Hz vblank, as on the console. Experimental: Immediate
+         * may cut up to a frame of input lag; no difference was felt on a
+         * Pixel 9 Pro Fold (2026-11-17) */
+        new Setting("flipVblank", "RECOMP_FLIP_VBLANK", "Frame pacing (experimental)", new String[][] {
+            { "1", "Console vblank: each frame waits for the next 60 Hz tick" },
+            { "0", "Immediate: frames shown as soon as the game flips" },
+        }, null),
     };
 
     private GameSettings() {

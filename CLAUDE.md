@@ -408,7 +408,8 @@ in nfsu2-sw's README (Configuration section); the toolkit is the same.
   GLES 3.2, else 3.1; a start screen picks the game folder (found in
   mcdub3-nx/ and switch/mcdub3-nx/ on every storage, any edition); its
   Settings screen (android/.../GameSettings.java, 2026-11-17) holds the
-  on-screen pad mode and the aspect ratio (RECOMP_WIDESCREEN=0: 4:3). A
+  on-screen pad mode, the aspect ratio (RECOMP_WIDESCREEN=0: 4:3) and an
+  experimental frame pacing switch (RECOMP_FLIP_VBLANK=0). A
   setting is one entry in GameSettings.ALL naming a runtime variable;
   non-default ones reach android_host.c as MC3_LAUNCHER_ENV (VAR=value
   lines, applied after the env files); keyboard keys handed to SDL as keys.
